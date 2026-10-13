@@ -1284,3 +1284,29 @@ it.effect(
     }).pipe(Effect.provide(layer));
   },
 );
+
+it.effect("records the API host in repository identities while keeping the SSH locator", () => {
+  const { layer } = harness({ remotes: "", api: {}, sshHostname: "github.com" });
+  return Effect.gen(function* () {
+    const provider = yield* GitHubSourceControlProvider.make;
+    const identity = {
+      canonicalKey: "github.com-work/acme/web",
+      provider: "github",
+      rootPath: "/work repo",
+      displayName: "acme/web",
+      locator: {
+        source: "git-remote" as const,
+        remoteName: "upstream",
+        remoteUrl: "git@github.com-work:acme/web.git",
+      },
+      origin: { canonicalKey: "github.com-work/fake-user/web", displayName: "fake-user/web" },
+    };
+    const refined = yield* provider.refineRepositoryIdentity!({
+      identity,
+      resolveContext: () => Effect.die("unused"),
+    });
+    assert.strictEqual(refined.canonicalKey, "github.com/acme/web");
+    assert.strictEqual(refined.origin?.canonicalKey, "github.com/fake-user/web");
+    assert.deepStrictEqual(refined.locator, identity.locator);
+  }).pipe(Effect.provide(layer));
+});

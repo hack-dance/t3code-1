@@ -1,8 +1,21 @@
 import * as Effect from "effect/Effect";
+import * as NodeNet from "node:net";
 import { isSshRemoteUrl } from "@t3tools/shared/sourceControl";
 import type * as SourceControlHost from "./SourceControlHost.ts";
 
 const SSH_HOSTNAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u;
+const PUBLIC_HOSTS = new Set([
+  "github.com",
+  "gitlab.com",
+  "bitbucket.org",
+  "codeberg.org",
+  "ssh.dev.azure.com",
+]);
+const SSH_TRANSPORT_HOSTS = new Map([
+  ["ssh.github.com", "github.com"],
+  ["altssh.gitlab.com", "gitlab.com"],
+  ["altssh.bitbucket.org", "bitbucket.org"],
+]);
 
 /** Keeps the original repository path when replacing the host. */
 function parseSshRemote(remoteUrl: string) {
@@ -57,6 +70,8 @@ export const resolveSshRemoteUrl = Effect.fn("resolveSshRemoteUrl")(function* (i
   const remote = parseSshRemote(input.remoteUrl);
   // Accept host names and aliases. Reject values that SSH can treat as command options.
   if (remote === null || !SSH_HOSTNAME_PATTERN.test(remote.hostname)) return input.remoteUrl;
+  // A public API host can use a different SSH endpoint, such as GitHub's port-443 host.
+  if (PUBLIC_HOSTS.has(remote.hostname.toLowerCase())) return input.remoteUrl;
 
   const output = yield* input.process
     .run({
@@ -74,9 +89,15 @@ export const resolveSshRemoteUrl = Effect.fn("resolveSshRemoteUrl")(function* (i
     })
     .pipe(Effect.orElseSucceed(() => null));
 
-  const hostname =
+  const resolvedHostname =
     output?.exitCode === 0 ? readSshHostname(output.stdout)?.toLowerCase() : undefined;
-  if (hostname === undefined || !SSH_HOSTNAME_PATTERN.test(hostname)) return input.remoteUrl;
+  if (
+    resolvedHostname === undefined ||
+    !SSH_HOSTNAME_PATTERN.test(resolvedHostname) ||
+    NodeNet.isIP(resolvedHostname)
+  )
+    return input.remoteUrl;
+  const hostname = SSH_TRANSPORT_HOSTS.get(resolvedHostname) ?? resolvedHostname;
 
   return `${remote.prefix}${hostname}${remote.suffix}`;
 });

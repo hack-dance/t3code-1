@@ -22,6 +22,6 @@ jobs:
           run-install: false
       - run: vp install
       - name: Focused regression tests
-        run: vp test run packages/source-control-core/src/server/sshRemote.test.ts packages/source-control-github/src/server/GitHubCredentials.test.ts packages/source-control-github/src/server/GitHubApi.test.ts packages/source-control-github/src/server/GitHubSourceControlProvider.test.ts packages/source-control-github/src/server/GitHubPullRequestApi.test.ts apps/server/src/sourceControl/SourceControlProviderRegistry.test.ts
+        run: vp test run packages/source-control-core/src/server/sshRemote.test.ts packages/source-control-github/src/server/GitHubCredentials.test.ts packages/source-control-github/src/server/GitHubApi.test.ts packages/source-control-github/src/server/GitHubSourceControlProvider.test.ts packages/source-control-github/src/server/GitHubPullRequestApi.test.ts apps/server/src/sourceControl/SourceControlProviderRegistry.test.ts apps/server/src/pullRequest/PullRequestService.test.ts apps/server/src/assets/AssetAccess.test.ts
       - name: Native OpenSSH and Git with spaces and Unicode
         run: node scripts/verify-ssh-alias-native.ts

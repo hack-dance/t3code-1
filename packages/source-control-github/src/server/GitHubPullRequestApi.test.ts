@@ -4638,6 +4638,10 @@ it.effect("loads PR details and files with the repo account rather than the acti
     expect((yield* cli.getPullRequestDetail(input)).title).toBe("Pull request 7");
     expect((yield* cli.getPullRequestDiff({ ...input, cursor: "1" })).patch).toBe("");
     expect(
+      (yield* Effect.flip(cli.runPullRequestAction({ ...input, action: "merge", stackNumber: 1 })))
+        ._tag,
+    ).toBe("GitHubStackChangedError");
+    expect(
       (yield* Effect.flip(cli.getPullRequestDetail({ ...input, cwd: "/personal repo" })))._tag,
     ).toBe("GitHubApiNotFoundError");
   }),

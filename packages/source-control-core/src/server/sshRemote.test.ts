@@ -124,3 +124,41 @@ it.effect("reads the SSH URL's user, alias, and transport port", () =>
     expect(result).toBe("ssh://git@github.com:2222/example/project.git");
   }),
 );
+
+it.effect("keeps public API hosts when SSH uses an alternate endpoint or IP address", () =>
+  Effect.gen(function* () {
+    for (const hostname of ["github.com", "gitlab.com", "bitbucket.org"]) {
+      const remoteUrl = `git@${hostname}:example/project.git`;
+      expect(
+        yield* resolveSshRemoteUrl({
+          remoteUrl,
+          cwd: "/repo",
+          process: { run: () => Effect.die("Known API hosts do not need SSH resolution") },
+        }),
+      ).toBe(remoteUrl);
+    }
+    for (const [hostname, expectedHost] of [
+      ["ssh.github.com", "github.com"],
+      ["altssh.gitlab.com", "gitlab.com"],
+      ["altssh.bitbucket.org", "bitbucket.org"],
+      ["192.0.2.1", "work"],
+    ]) {
+      expect(
+        yield* resolveSshRemoteUrl({
+          remoteUrl: "git@work:example/project.git",
+          cwd: "/repo",
+          process: {
+            run: () =>
+              Effect.succeed({
+                stdout: `hostname ${hostname}\r\n`,
+                stderr: "",
+                exitCode: ChildProcessSpawner.ExitCode(0),
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              }),
+          },
+        }),
+      ).toBe(`git@${expectedHost}:example/project.git`);
+    }
+  }),
+);

@@ -734,7 +734,10 @@ export const make = Effect.gen(function* () {
       const identity = project.repositoryIdentity;
       if (
         (identity?.provider !== "unknown" &&
-          !(identity?.provider === "forgejo" && isSshRemoteUrl(identity.locator.remoteUrl))) ||
+          !(
+            (identity?.provider === "forgejo" || identity?.provider === "github") &&
+            isSshRemoteUrl(identity.locator.remoteUrl)
+          )) ||
         sourceControlRepositorySelector(project.repositoryIdentity) === null
       )
         continue;
@@ -776,7 +779,9 @@ export const make = Effect.gen(function* () {
                       : provider,
                   remoteName,
                   remoteUrl,
-                  ...(filter.host !== undefined && isSshRemoteUrl(remoteUrl)
+                  ...(filter.host !== undefined &&
+                  provider.kind !== "github" &&
+                  isSshRemoteUrl(remoteUrl)
                     ? { requestedHost: filter.host }
                     : {}),
                 },
@@ -853,14 +858,15 @@ export const make = Effect.gen(function* () {
           let refinedProvider: SourceControlProviderInfo | null | undefined;
           if (
             kind === "unknown" ||
-            (kind === "forgejo" && isSshRemoteUrl(identity.locator.remoteUrl))
+            ((kind === "forgejo" || kind === "github") &&
+              isSshRemoteUrl(identity.locator.remoteUrl))
           ) {
             const provider = detectSourceControlProviderFromRemoteUrl(identity.locator.remoteUrl);
             refinedProvider = provider === null ? null : refinedProviders.get(provider.baseUrl);
             kind = refinedProvider?.kind ?? kind;
           }
           const host =
-            refinedProvider?.kind === "forgejo"
+            refinedProvider?.kind === "forgejo" || refinedProvider?.kind === "github"
               ? new URL(refinedProvider.baseUrl).host.toLowerCase()
               : pullRequestHostOf(identity, kind);
           if (filter.host !== undefined && host !== filter.host.toLowerCase()) {

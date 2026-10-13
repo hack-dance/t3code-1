@@ -7654,3 +7654,57 @@ it.effect.each([
       assert.deepStrictEqual(calls, [expected]);
     }),
 );
+
+it.effect(
+  "reads an aliased project's PR with its checkout when another GitHub project exists",
+  () =>
+    Effect.gen(function* () {
+      const reads: Array<{ cwd: string; host: string }> = [];
+      const service = yield* makeService({
+        projects: [
+          project({
+            id: "work",
+            title: "work",
+            workspaceRoot: "/work repo",
+            repository: "acme/web",
+            host: "github.com-work",
+            remoteUrl: "git@github.com-work:acme/web.git",
+          }),
+          project({
+            id: "personal",
+            title: "personal",
+            workspaceRoot: "/personal repo",
+            repository: "fake-user/demo",
+          }),
+        ],
+        providers: [
+          fakeProvider(SourceControlProviderKind.make("github"), {
+            getChangeRequest: (input) => {
+              reads.push({ cwd: input.cwd, host: input.host });
+              return Effect.succeed(hostedChangeRequest("Work PR"));
+            },
+          }),
+        ],
+        resolveHandle: ({ context }) =>
+          Effect.succeed({
+            provider: undefined as never,
+            context: {
+              ...context!,
+              provider: {
+                kind: SourceControlProviderKind.make("github"),
+                name: "GitHub",
+                baseUrl: "https://github.com",
+              },
+            },
+          }),
+      });
+      const detail = yield* service.detail({
+        projectId: "work" as ProjectId,
+        repository: "acme/web",
+        host: "github.com",
+        number: 7,
+      });
+      assert.strictEqual(detail.workspaceRoot, "/work repo");
+      assert.deepStrictEqual(reads, [{ cwd: "/work repo", host: "github.com" }]);
+    }),
+);

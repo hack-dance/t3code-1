@@ -969,6 +969,35 @@ export const make = Effect.gen(function* () {
     Effect.provideService(GitHubCredentials.RepositoryDirectory, cwd);
 
   return SourceControlProvider.SourceControlProvider.of({
+    refineRepositoryIdentity: Effect.fn("GitHubSourceControlProvider.refineRepositoryIdentity")(
+      function* ({ identity }) {
+        if (!identity.rootPath || !isSshRemoteUrl(identity.locator.remoteUrl)) return identity;
+        const resolved = yield* resolveSshRemoteUrl({
+          remoteUrl: identity.locator.remoteUrl,
+          cwd: identity.rootPath,
+          process,
+        });
+        if (resolved === identity.locator.remoteUrl || gitHubApiHostForRemote(resolved) === null)
+          return identity;
+        const canonicalKey = normalizeGitRemoteUrl(resolved);
+        const oldHost = identity.canonicalKey.split("/")[0];
+        const host = canonicalKey.split("/")[0];
+        const origin = identity.origin;
+        return {
+          ...identity,
+          provider: SourceControlProviderKind.make("github"),
+          canonicalKey,
+          ...(origin !== undefined && origin.canonicalKey.split("/")[0] === oldHost
+            ? {
+                origin: {
+                  ...origin,
+                  canonicalKey: `${host}/${origin.canonicalKey.split("/").slice(1).join("/")}`,
+                },
+              }
+            : {}),
+        };
+      },
+    ),
     kind: SourceControlProviderKind.make("github"),
     // `gh pr list --head` filters on the head ref name alone and accepts anything, so an
     // `owner:branch` or `remote:branch` selector silently lists zero pull requests while
