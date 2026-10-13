@@ -30,6 +30,7 @@ function harness(
   hosts: Record<string, { readonly account?: string; readonly enabled?: boolean }> = {},
   signedOut: ReadonlyArray<string> = [],
   tokens: Record<string, string> = {},
+  repositories: Record<string, string> = {},
 ) {
   const calls: Array<ReadonlyArray<string>> = [];
   const run: SourceControlHost.SourceControlHost["Service"]["process"]["run"] = (input) =>
@@ -60,6 +61,7 @@ function harness(
           sourceControlHosts: { github: { hosts: hostSettings(hosts), tokens } },
         }),
         process: { run },
+        git: { readConfigValue: (cwd) => Effect.succeed(repositories[cwd] ?? null) },
       }),
     ),
     Layer.provide(NodeCrypto.layer),
@@ -183,4 +185,52 @@ describe("GitHubCredentials", () => {
       );
     }).pipe(Effect.provide(layer));
   });
+});
+
+it.effect(
+  "keeps repo accounts separate from settings and each other, including invalidation",
+  () => {
+    const { layer, calls } = harness(
+      { "github.com": { account: "personal" } },
+      [],
+      {},
+      {
+        "/work": "work-user",
+        "/other": "other-user",
+      },
+    );
+    return Effect.gen(function* () {
+      const credentials = yield* GitHubCredentials.GitHubCredentials;
+      const get = (cwd: string) =>
+        credentials
+          .get("github.com")
+          .pipe(Effect.provideService(GitHubCredentials.RepositoryDirectory, cwd));
+      expect(Redacted.value((yield* get("/work")).token)).toBe("token-for-work-user");
+      expect(Redacted.value((yield* get("/other")).token)).toBe("token-for-other-user");
+      yield* credentials
+        .invalidate("github.com")
+        .pipe(Effect.provideService(GitHubCredentials.RepositoryDirectory, "/work"));
+      yield* get("/work");
+      yield* get("/other");
+      expect(calls).toEqual([
+        ["auth", "token", "--hostname", "github.com", "--user", "work-user"],
+        ["auth", "token", "--hostname", "github.com", "--user", "other-user"],
+        ["auth", "token", "--hostname", "github.com", "--user", "work-user"],
+      ]);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect("does not fall back to another account when the repo account is signed out", () => {
+  const { layer, calls } = harness({}, ["work-user"], {}, { "/work": "work-user" });
+  return Effect.gen(function* () {
+    const credentials = yield* GitHubCredentials.GitHubCredentials;
+    const error = yield* Effect.flip(
+      credentials
+        .get("github.com")
+        .pipe(Effect.provideService(GitHubCredentials.RepositoryDirectory, "/work")),
+    );
+    expect(error._tag).toBe("GitHubNotSignedInError");
+    expect(calls).toEqual([["auth", "token", "--hostname", "github.com", "--user", "work-user"]]);
+  }).pipe(Effect.provide(layer));
 });

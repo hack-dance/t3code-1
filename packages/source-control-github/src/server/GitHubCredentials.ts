@@ -84,6 +84,12 @@ export type GitHubCredentialUnavailableError =
   | GitHubHostDisabledError
   | GitHubCliFailedError;
 
+/** The checkout for this request. Host discovery does not select a repository account. */
+export const RepositoryDirectory = Context.Reference<string | null>(
+  "@t3tools/source-control-github/server/GitHubCredentials/RepositoryDirectory",
+  { defaultValue: () => null },
+);
+
 /**
  * Where GitHub tokens come from. Callers ask per host and never see how the token was found,
  * so another source (an in-app OAuth login) slots in here without touching any of them.
@@ -201,21 +207,31 @@ export const make = Effect.gen(function* () {
     );
 
   /** Cache key: the host plus its pinned account, so a changed pin misses the cache. */
-  const cacheKey = (host: string, account: string | undefined) =>
-    account === undefined ? host : `${host}\u0000${account}`;
+  const cacheKey = (host: string, account: string | undefined, repository = false) =>
+    account === undefined ? host : `${host}\u0000${account}${repository ? "\u0000repo" : ""}`;
+
+  const repositoryAccount = Effect.fn("GitHubCredentials.repositoryAccount")(function* () {
+    const cwd = yield* RepositoryDirectory;
+    if (cwd === null) return undefined;
+    return yield* sourceControlHost.git.readConfigValue(cwd, "github.user").pipe(
+      Effect.map((value) => value?.trim() || undefined),
+      Effect.orElseSucceed(() => undefined),
+    );
+  });
 
   const lookup = Effect.fn("GitHubCredentials.lookup")(function* (key: string) {
-    const [host = key, choice] = key.split("\u0000");
+    const [host = key, choice, repository] = key.split("\u0000");
     // An environment token wins over a pinned account, exactly as it does in gh.
     const fromEnv = environmentToken(host, environment);
-    // A pinned login gh no longer holds (logged out, expired) falls back to the active one,
-    // which is what discovery reports as the account in use.
+    // Keep the existing Settings fallback. A repository account must never fall back to another login.
     const token =
       fromEnv ??
       (yield* fromGh(host, choice).pipe(
         Effect.catchTags({
           GitHubNotSignedInError: (error) =>
-            choice === undefined ? Effect.fail(error) : fromGh(host, undefined),
+            choice === undefined || repository === "repo"
+              ? Effect.fail(error)
+              : fromGh(host, undefined),
         }),
       ));
     return {
@@ -257,14 +273,21 @@ export const make = Effect.gen(function* () {
           fingerprint: yield* fingerprintOf(host, saved),
         } satisfies GitHubCredential;
       }
-      return yield* Cache.get(cache, cacheKey(host, choice?.account));
-    }),
-    invalidate: (rawHost) => {
-      const host = normalizeHost(rawHost);
-      return hostChoice(host).pipe(
-        Effect.flatMap((choice) => Cache.invalidate(cache, cacheKey(host, choice?.account))),
+      const account = yield* repositoryAccount();
+      return yield* Cache.get(
+        cache,
+        cacheKey(host, account ?? choice?.account, account !== undefined),
       );
-    },
+    }),
+    invalidate: Effect.fn("GitHubCredentials.invalidate")(function* (rawHost) {
+      const host = normalizeHost(rawHost);
+      const choice = yield* hostChoice(host);
+      const account = yield* repositoryAccount();
+      yield* Cache.invalidate(
+        cache,
+        cacheKey(host, account ?? choice?.account, account !== undefined),
+      );
+    }),
   });
 });
 

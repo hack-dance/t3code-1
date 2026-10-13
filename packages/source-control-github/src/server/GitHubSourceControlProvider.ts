@@ -22,6 +22,7 @@ import { decodeJsonResult } from "@t3tools/shared/schemaJson";
 import { isSshRemoteUrl } from "@t3tools/shared/sourceControl";
 
 import * as GitHubApi from "./GitHubApi.ts";
+import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubChangeRequestTemplate from "./gitHubChangeRequestTemplate.ts";
 import {
   decodeGitHubPullRequestEntries,
@@ -53,6 +54,7 @@ import {
   type SourceControlManagedCliDiscoverySpec,
 } from "@t3tools/source-control-core/server/discovery";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
+import { resolveSshRemoteUrl } from "@t3tools/source-control-core/server/sshRemote";
 import { readSourceControlHostSettings } from "@t3tools/source-control-core/client/definition";
 
 import * as GitHubClient from "../client/definition.ts";
@@ -508,7 +510,19 @@ export const make = Effect.gen(function* () {
       readonly context?: SourceControlProvider.SourceControlProviderContext | undefined;
     }) {
       const envRepository = environment.GH_REPO?.trim();
-      const hostHint = input.host ?? contextHost(input.context);
+      const resolvedContextUrl =
+        input.context === undefined
+          ? undefined
+          : yield* resolveSshRemoteUrl({
+              remoteUrl: input.context.remoteUrl,
+              cwd: input.cwd,
+              process,
+            });
+      const contextResolvedHost =
+        resolvedContextUrl !== undefined && resolvedContextUrl !== input.context?.remoteUrl
+          ? (gitHubApiHostForRemote(resolvedContextUrl) ?? undefined)
+          : undefined;
+      const hostHint = contextResolvedHost ?? input.host ?? contextHost(input.context);
       const defaultHost = (hostHint ?? environment.GH_HOST ?? "github.com").toLowerCase();
       if (envRepository) {
         const locator = parseGitHubRepositorySelector(envRepository, defaultHost);
@@ -518,8 +532,15 @@ export const make = Effect.gen(function* () {
         gitRead(input.cwd, ["remote", "-v"]),
         gitRead(input.cwd, ["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"]),
       ]).pipe(Effect.orElseSucceed(() => [null, null] as const));
+      const normalizedRemotes = yield* Effect.forEach(
+        parseFetchRemotes(remotes?.exitCode === 0 ? remotes.stdout : ""),
+        (remote) =>
+          resolveSshRemoteUrl({ remoteUrl: remote.url, cwd: input.cwd, process }).pipe(
+            Effect.map((url) => `${remote.name}\t${url} (fetch)`),
+          ),
+      );
       const { host, locator } = resolveGitHubRepository({
-        remotes: remotes?.exitCode === 0 ? remotes.stdout : "",
+        remotes: normalizedRemotes.join("\n"),
         resolved: resolved?.exitCode === 0 ? resolved.stdout : "",
         hostHint,
         defaultHost,
@@ -564,6 +585,7 @@ export const make = Effect.gen(function* () {
         request.owner,
         request.name,
         String(request.allowReserve),
+        Context.getOrElse(context, GitHubCredentials.RepositoryDirectory, () => null) ?? "",
         Context.getOrElse(context, GitHubApi.PinnedGitHubCredential, () => null)
           ?.credentialFingerprint ?? "",
         Context.getOrElse(context, SourceControlRateLimit.CredentialScope, () => ""),
@@ -943,6 +965,9 @@ export const make = Effect.gen(function* () {
     return { title: subject.title, body: subject.body ?? null };
   });
 
+  const inRepository = (cwd: string) =>
+    Effect.provideService(GitHubCredentials.RepositoryDirectory, cwd);
+
   return SourceControlProvider.SourceControlProvider.of({
     kind: SourceControlProviderKind.make("github"),
     // `gh pr list --head` filters on the head ref name alone and accepts anything, so an
@@ -964,7 +989,9 @@ export const make = Effect.gen(function* () {
         input.url.pathname,
       );
       if (!match) return undefined;
-      return readLinkSubject(input, `repos/${match[1]}/${match[2]}/issues/${match[3]}`);
+      return readLinkSubject(input, `repos/${match[1]}/${match[2]}/issues/${match[3]}`).pipe(
+        inRepository(input.cwd),
+      );
     },
     listChangeRequests: (input) =>
       // An open lookup is a user waiting on a status; the rest may be a background sweep.
@@ -984,6 +1011,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           providerError("listChangeRequests", input.cwd, { reference: input.headSelector }),
         ),
+        inRepository(input.cwd),
       ),
     getChangeRequest: (input) =>
       readPullRequest({ ...input, host: contextHost(input.context) }).pipe(
@@ -991,6 +1019,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           providerError("getChangeRequest", input.cwd, { reference: input.reference }),
         ),
+        inRepository(input.cwd),
       ),
     createChangeRequest: (input) =>
       Effect.gen(function* () {
@@ -1023,6 +1052,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           providerError("createChangeRequest", input.cwd, { reference: input.headSelector }),
         ),
+        inRepository(input.cwd),
       ),
     getRepositoryCloneUrls: (input) =>
       Effect.gen(function* () {
@@ -1043,6 +1073,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           providerError("getRepositoryCloneUrls", input.cwd, { repository: input.repository }),
         ),
+        inRepository(input.cwd),
       ),
     createRepository: (input) =>
       Effect.gen(function* () {
@@ -1077,6 +1108,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           providerError("createRepository", input.cwd, { repository: input.repository }),
         ),
+        inRepository(input.cwd),
       ),
     getDefaultBranch: (input) =>
       Effect.gen(function* () {
@@ -1088,12 +1120,16 @@ export const make = Effect.gen(function* () {
         const repository = yield* readRepository(locator);
         const branch = repository.default_branch?.trim() ?? "";
         return branch.length > 0 ? branch : null;
-      }).pipe(Effect.mapError(providerError("getDefaultBranch", input.cwd))),
+      }).pipe(
+        Effect.mapError(providerError("getDefaultBranch", input.cwd)),
+        inRepository(input.cwd),
+      ),
     checkoutChangeRequest: (input) =>
       checkoutPullRequest(input).pipe(
         Effect.mapError(
           providerError("checkoutChangeRequest", input.cwd, { reference: input.reference }),
         ),
+        inRepository(input.cwd),
       ),
   });
 });

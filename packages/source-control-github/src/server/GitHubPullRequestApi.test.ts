@@ -4588,3 +4588,86 @@ layer("GitHubPullRequestApi.layer", (it) => {
     }),
   );
 });
+
+it.effect("loads PR details and files with the repo account rather than the active account", () =>
+  Effect.gen(function* () {
+    const credentials = Layer.succeed(
+      GitHubCredentials.GitHubCredentials,
+      GitHubCredentials.GitHubCredentials.of({
+        get: (host) =>
+          Effect.gen(function* () {
+            const cwd = yield* GitHubCredentials.RepositoryDirectory;
+            const account = cwd === "/work repo" ? "work" : "personal";
+            return {
+              host,
+              token: Redacted.make(`fake-${account}`),
+              source: "gh" as const,
+              fingerprint: `${host}:${account}`,
+            };
+          }),
+        invalidate: () => Effect.void,
+      }),
+    );
+    const http = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            request.headers.authorization !== "Bearer fake-work"
+              ? new Response(encodeJson({ message: "Not Found" }), { status: 404 })
+              : new Response(
+                  encodeJson(request.url.endsWith("/graphql") ? coreResponse({ id: "PR_7" }) : []),
+                ),
+          ),
+        ),
+      ),
+    );
+    const cli = yield* GitHubPullRequestApi.make.pipe(
+      Effect.provide(
+        GitHubApi.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(credentials, http, GitHubQuota.layer, SourceControlRateLimit.layer),
+          ),
+          Layer.provideMerge(TestSourceControlHost.layer()),
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    );
+    const input = { cwd: "/work repo", repository: "acme/web", host: "github.com", number: 7 };
+    expect((yield* cli.getPullRequestDetail(input)).title).toBe("Pull request 7");
+    expect((yield* cli.getPullRequestDiff({ ...input, cursor: "1" })).patch).toBe("");
+    expect(
+      (yield* Effect.flip(cli.getPullRequestDetail({ ...input, cwd: "/personal repo" })))._tag,
+    ).toBe("GitHubApiNotFoundError");
+  }),
+);
+
+layer("repo account batching", (it) => {
+  it.effect("keeps summaries from different checkouts under their own account", () =>
+    Effect.gen(function* () {
+      const directories: Array<string | null> = [];
+      mockedExecute.mockImplementation(() =>
+        Effect.gen(function* () {
+          const cwd = yield* GitHubCredentials.RepositoryDirectory;
+          directories.push(cwd);
+          const pullRequest = { ...coreResponse().data.repository.pullRequest, title: cwd };
+          return output(encodeJson({ data: { s0: { pullRequest }, s1: { pullRequest } } }));
+        }),
+      );
+      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+      const pending = yield* Effect.forEach(
+        ["/work repo", "/personal repo"],
+        (cwd) =>
+          cli.getPullRequestSummary({ cwd, repository: "acme/web", host: "github.com", number: 7 }),
+        { concurrency: "unbounded" },
+      ).pipe(Effect.forkChild);
+      yield* TestClock.adjust("10 millis");
+      expect((yield* Fiber.join(pending)).map((summary) => summary.title)).toEqual([
+        "/work repo",
+        "/personal repo",
+      ]);
+      expect(directories.toSorted()).toEqual(["/personal repo", "/work repo"]);
+    }),
+  );
+});

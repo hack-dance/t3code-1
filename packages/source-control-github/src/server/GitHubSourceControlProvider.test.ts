@@ -80,6 +80,7 @@ function harness(input: {
   readonly api: Partial<GitHubApi.GitHubApi["Service"]>;
   readonly localBranches?: ReadonlyArray<string>;
   readonly resolved?: string;
+  readonly sshHostname?: string;
   /** Fails the local branch listing, the first git read a checkout makes. */
   readonly gitFailure?: unknown;
 }) {
@@ -118,9 +119,11 @@ function harness(input: {
     process: {
       run: (args) =>
         Effect.succeed(
-          args.args[0] === "remote"
-            ? processOutput(input.remotes)
-            : processOutput(input.resolved ?? "", input.resolved ? 0 : 1),
+          args.command === "ssh" && input.sshHostname
+            ? processOutput(`hostname ${input.sshHostname}\n`)
+            : args.args[0] === "remote"
+              ? processOutput(input.remotes)
+              : processOutput(input.resolved ?? "", input.resolved ? 0 : 1),
         ),
     },
   });
@@ -1215,5 +1218,69 @@ it.effect.each([
       Effect.provideService(HostProcess.Environment, { GH_REPO: envRepository }),
       Effect.scoped,
     );
+  },
+);
+
+it.effect(
+  "lists change requests on a dotted alias's configured API host with the checkout context",
+  () => {
+    const hosts: string[] = [];
+    const { layer } = harness({
+      remotes: remotesOutput(["origin", "git@github.com-work:acme/web.git"]),
+      sshHostname: "github.com",
+      api: {
+        graphql: (input) =>
+          Effect.gen(function* () {
+            assert.strictEqual(yield* GitHubCredentials.RepositoryDirectory, "/repo");
+            hosts.push(input.host);
+            return encodeJson({
+              data: { repository: { h0: { nodes: [node(7, "feature")] } } },
+            });
+          }),
+      },
+    });
+    return Effect.gen(function* () {
+      const provider = yield* GitHubSourceControlProvider.make;
+      const pending = yield* provider
+        .listChangeRequests({
+          cwd: "/repo",
+          context: githubContext("github.com-work"),
+          headSelector: "feature",
+          state: "open",
+        })
+        .pipe(Effect.forkChild);
+      yield* TestClock.adjust("50 millis");
+      const requests = yield* Fiber.join(pending);
+      assert.strictEqual(requests[0]?.number, 7);
+      assert.deepStrictEqual(hosts, ["github.com"]);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect(
+  "keeps simultaneous lookups from different checkouts in separate account contexts",
+  () => {
+    const directories: Array<string | null> = [];
+    const { layer } = harness({
+      remotes: remotesOutput(["origin", "https://github.com/acme/web.git"]),
+      api: {
+        graphql: () =>
+          Effect.gen(function* () {
+            directories.push(yield* GitHubCredentials.RepositoryDirectory);
+            return encodeJson({ data: { repository: { h0: { nodes: [node(7, "feature")] } } } });
+          }),
+      },
+    });
+    return Effect.gen(function* () {
+      const provider = yield* GitHubSourceControlProvider.make;
+      const pending = yield* Effect.forEach(
+        ["/personal", "/work"],
+        (cwd) => provider.listChangeRequests({ cwd, headSelector: "feature", state: "open" }),
+        { concurrency: "unbounded" },
+      ).pipe(Effect.forkChild);
+      yield* TestClock.adjust("50 millis");
+      yield* Fiber.join(pending);
+      assert.deepStrictEqual(directories.toSorted(), ["/personal", "/work"]);
+    }).pipe(Effect.provide(layer));
   },
 );
