@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import { SourceControlProviderKind } from "@t3tools/contracts";
 import { afterEach, assert, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
@@ -4681,3 +4682,64 @@ layer("repo account batching", (it) => {
     }),
   );
 });
+
+it.effect(
+  "holds a background account lookup during a pause while allowing an interactive lookup",
+  () => {
+    let requests = 0;
+    const dependencies = Layer.mergeAll(
+      Layer.succeed(
+        GitHubCredentials.GitHubCredentials,
+        GitHubCredentials.GitHubCredentials.of({
+          get: (host) =>
+            Effect.succeed({
+              host,
+              token: Redacted.make("fake-credential"),
+              fingerprint: "test-account",
+              source: "gh" as const,
+            }),
+          invalidate: () => Effect.void,
+        }),
+      ),
+      Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) => {
+          requests += 1;
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              new Response(encodeJson({ id: 123, login: "work-user" })),
+            ),
+          );
+        }),
+      ),
+      GitHubQuota.layer,
+      SourceControlRateLimit.layer,
+      TestSourceControlHost.layer(),
+      NodeServices.layer,
+    );
+    return Effect.gen(function* () {
+      const api = yield* GitHubApi.make;
+      const cli = yield* GitHubPullRequestApi.make.pipe(
+        Effect.provideService(GitHubApi.GitHubApi, api),
+      );
+      const limits = yield* SourceControlRateLimit.SourceControlRateLimit;
+      const key = { provider: SourceControlProviderKind.make("github"), host: "github.com" };
+      yield* limits
+        .recordRateLimit({ ...key, lease: 0 })
+        .pipe(Effect.provideService(SourceControlRateLimit.CredentialScope, "test-account"));
+      const input = { cwd: "/work", host: "github.com" };
+      const refused = yield* Effect.flip(
+        cli.withVerifiedCredential({ ...input, allowReserve: false }, Effect.succeed),
+      );
+      expect(refused._tag).toBe("SourceControlRateLimitPausedError");
+      expect(requests).toBe(0);
+      const identity = yield* cli.withVerifiedCredential(
+        { ...input, allowReserve: true },
+        Effect.succeed,
+      );
+      expect(identity.viewer).toBe("work-user");
+      expect(requests).toBe(1);
+    }).pipe(Effect.provide(dependencies));
+  },
+);

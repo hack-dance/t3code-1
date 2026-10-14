@@ -455,7 +455,7 @@ export class GitHubPullRequestApi extends Context.Service<
   GitHubPullRequestApi,
   {
     readonly withVerifiedCredential: <A, E, R>(
-      input: { readonly cwd: string; readonly host: string },
+      input: { readonly cwd: string; readonly host: string; readonly allowReserve?: boolean },
       use: (identity: {
         readonly accountId: string;
         readonly viewer: string;
@@ -1130,7 +1130,11 @@ export const make = Effect.gen(function* () {
     ),
   );
   const captureVerifiedCredential = Effect.fn("GitHubPullRequestApi.captureVerifiedCredential")(
-    function* (input: { readonly cwd: string; readonly host: string }) {
+    function* (input: {
+      readonly cwd: string;
+      readonly host: string;
+      readonly allowReserve?: boolean;
+    }) {
       const unavailable = () => new GitHubViewerLoginUnavailableError({ cwd: input.cwd });
       const host = input.host.toLowerCase();
       // A missing or signed-out credential keeps its own error, so the page can say which.
@@ -1160,7 +1164,7 @@ export const make = Effect.gen(function* () {
                 host,
                 operation: "getRoutingIdentity",
                 path: "user",
-                allowReserve: true,
+                allowReserve: input.allowReserve ?? true,
               }).pipe(
                 Effect.provideService(GitHubApi.PinnedGitHubCredential, credential),
                 Effect.provideService(SourceControlRateLimit.CredentialScope, key),

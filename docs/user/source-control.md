@@ -31,13 +31,24 @@ If `gh` is signed in to several accounts or hosts, expand **GitHub** in the same
 the account each host uses or turn a host off. A saved token or `GH_TOKEN` takes precedence
 over that choice; a host turned off stays off either way.
 
-To select a GitHub.com CLI account for one repository, run `git config --local github.user YOUR_LOGIN`
-in that checkout. This overrides the host account selected in Settings; saved and environment
-tokens still take precedence. Remove the override with `git config --unset github.user`.
-T3 reads the effective Git configuration, so global values and conditional includes also apply.
-If the chosen account is signed out, requests fail instead of using another account.
-GitHub.com SSH aliases use the `HostName` from the server's SSH configuration for API requests and keep
-the alias for Git operations.
+To choose a GitHub.com account for a repository, run `git config --local github.user YOUR_LOGIN` in its folder.
+`YOUR_LOGIN` must name an account signed in to `gh` on the machine that runs the T3 Code server.
+The repository choice overrides the account in Settings. Saved tokens and environment tokens still take priority.
+
+To remove the local choice, run `git config --unset github.user` in that folder.
+Global Git configuration and conditional includes still apply.
+Conditional includes load extra Git configuration when their conditions match.
+When T3 Code uses `gh`, a signed-out selected account causes requests to fail.
+T3 Code does not switch to another account.
+
+An SSH alias is a local name for a server.
+For GitHub.com aliases, T3 Code reads `HostName` from the server machine's SSH configuration.
+It uses the real host for API requests. Git operations keep the alias.
+
+The PR inbox uses each repository's account for Authored and Reviewing.
+The inbox lists each repository once.
+If several folders contain it, the inbox uses the first folder with a signed-in account.
+Select a project to use that project's account.
 
 For GitHub Enterprise, sign in with `gh auth login --hostname YOUR_HOST`. T3 Code treats a
 custom server name as GitHub once it has a credential for that host.

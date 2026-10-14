@@ -171,15 +171,13 @@ export const withCredential =
       const credential =
         pinned?.host === normalized
           ? pinned
-          : yield* api
-              .credential(normalized)
-              .pipe(
-                Effect.map(({ token, fingerprint }) => ({
-                  host: normalized,
-                  token,
-                  credentialFingerprint: fingerprint,
-                })),
-              );
+          : yield* api.credential(normalized).pipe(
+              Effect.map(({ token, fingerprint }) => ({
+                host: normalized,
+                token,
+                credentialFingerprint: fingerprint,
+              })),
+            );
       return yield* effect.pipe(
         Effect.provideService(PinnedGitHubCredential, credential),
         Effect.provideService(

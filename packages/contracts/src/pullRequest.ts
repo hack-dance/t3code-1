@@ -526,8 +526,7 @@ export const PullRequestListEntry = Schema.Struct({
   stack: Schema.optional(PullRequestStackMembership),
   provider: SourceControlProviderKind,
   /**
-   * The host below which `repository` is addressed, so the same provider kind can serve more
-   * than one account — github.com and a GitHub Enterprise install are different identities.
+   * The host below which `repository` is addressed. Accounts on that host are selected per checkout.
    */
   host: TrimmedNonEmptyString,
   projectId: ProjectId,
@@ -554,6 +553,8 @@ export const PullRequestListEntry = Schema.Struct({
   updatedAt: IsoDateTime,
   /** Server epoch milliseconds when the provider read started; preserved on cache hits. */
   observedAt: Schema.optional(Schema.Finite),
+  /** The checkout's signed-in login. Older servers only provide the host-wide viewer map. */
+  viewer: Schema.optional(TrimmedNonEmptyString),
   viewerReviewRequested: Schema.Boolean,
   labels: Schema.Array(PullRequestLabel),
   /** Absent where the host does not summarise its reviews, which is every host but GitHub. */
@@ -564,9 +565,8 @@ export const PullRequestListEntry = Schema.Struct({
 export type PullRequestListEntry = typeof PullRequestListEntry.Type;
 
 /**
- * Where each repository a listing already reached carries on from, keyed `"<host> <repository>"`
- * — which is how a listing tells two repositories apart, since the same `owner/repo` exists on
- * github.com and on an Enterprise install at once.
+ * Where each repository a listing already reached carries on from, keyed "<host> <repository>".
+ * A repository uses its first readable checkout's account within a listing.
  *
  * Each value is opaque: only the provider that issued one knows what it means, and the page hands
  * back exactly what it was given rather than composing one.
@@ -656,10 +656,8 @@ export type PullRequestListProjectError = typeof PullRequestListProjectError.Typ
 
 export const PullRequestListResult = Schema.Struct({
   /**
-   * The signed-in account per host, which is what involvement filtering compares. Keyed by
-   * host rather than by provider kind: two GitHub hosts are two accounts. A host that could
-   * not be read is absent rather than present-and-undefined, because an open-keyed record
-   * cannot carry an optional value through the JSON codec.
+   * A fallback signed-in login per host for older list entries. An entry's own viewer takes
+   * precedence when present. Hosts with no readable account are absent.
    */
   viewers: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString),
   providers: Schema.Array(PullRequestProviderSummary),
