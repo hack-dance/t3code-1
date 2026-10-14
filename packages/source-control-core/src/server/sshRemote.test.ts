@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import { ChildProcessSpawner } from "effect/process";
 import { resolveSshRemoteUrl } from "./sshRemote.ts";
 
-it.effect("resolves SCP and SSH URL aliases, including enterprise hosts", () =>
+it.effect("resolves GitHub.com aliases and preserves other hosting endpoints", () =>
   Effect.gen(function* () {
     for (const [remoteUrl, hostname, expected] of [
       [
@@ -15,9 +15,9 @@ it.effect("resolves SCP and SSH URL aliases, including enterprise hosts", () =>
       [
         "ssh://git@work:2222/example/project.git",
         "github.example.test",
-        "ssh://git@github.example.test:2222/example/project.git",
+        "ssh://git@work:2222/example/project.git",
       ],
-      ["git@work:example/project.git", "gitlab.com", "git@gitlab.com:example/project.git"],
+      ["git@work:example/project.git", "gitlab.com", "git@work:example/project.git"],
       [
         "ssh://git@work:2222/group/../project%20name.git",
         "github.com",
@@ -139,8 +139,10 @@ it.effect("keeps public API hosts when SSH uses an alternate endpoint or IP addr
     }
     for (const [hostname, expectedHost] of [
       ["ssh.github.com", "github.com"],
-      ["altssh.gitlab.com", "gitlab.com"],
-      ["altssh.bitbucket.org", "bitbucket.org"],
+      ["altssh.gitlab.com", "work"],
+      ["altssh.bitbucket.org", "work"],
+      ["ssh.github.example.test", "work"],
+      ["gitea.example.test", "work"],
       ["192.0.2.1", "work"],
     ]) {
       expect(

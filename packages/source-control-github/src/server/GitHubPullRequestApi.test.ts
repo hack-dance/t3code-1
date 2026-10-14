@@ -4651,6 +4651,12 @@ layer("repo account batching", (it) => {
   it.effect("keeps summaries from different checkouts under their own account", () =>
     Effect.gen(function* () {
       const directories: Array<string | null> = [];
+      mockedCredential.mockImplementation((host) =>
+        Effect.gen(function* () {
+          const cwd = yield* GitHubCredentials.RepositoryDirectory;
+          return { token: Redacted.make("fake-token"), fingerprint: `${host}:${cwd}` };
+        }),
+      );
       mockedExecute.mockImplementation(() =>
         Effect.gen(function* () {
           const cwd = yield* GitHubCredentials.RepositoryDirectory;

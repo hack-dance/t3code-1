@@ -1771,7 +1771,6 @@ export const make = Effect.gen(function* () {
     key: ({ request, context }) =>
       JSON.stringify([
         request.host.toLowerCase(),
-        request.cwd,
         Context.getOrElse(context, GitHubApi.PinnedGitHubCredential, () => null)
           ?.credentialFingerprint ?? null,
         Context.getOrElse(context, SourceControlRateLimit.CredentialScope, () => ""),
@@ -1841,7 +1840,10 @@ export const make = Effect.gen(function* () {
     RequestResolver.batchN(STAT_ALIASES_PER_REQUEST),
   );
   const getPullRequestSummary: GitHubPullRequestApi["Service"]["getPullRequestSummary"] = (input) =>
-    Effect.request(new PullRequestSummaryRead(input), summaryResolver);
+    Effect.request(new PullRequestSummaryRead(input), summaryResolver).pipe(
+      GitHubApi.withCredential(api, input.host),
+      inRepository(input.cwd),
+    );
 
   // Every watched pull request on a host in one read per pass. A pull request the batch has no
   // answer for gets null, and its watch reads it in full; a failed batch fails every entry.
@@ -1852,7 +1854,6 @@ export const make = Effect.gen(function* () {
     key: ({ request, context }) =>
       JSON.stringify([
         request.host.toLowerCase(),
-        request.cwd,
         Context.getOrElse(context, GitHubApi.PinnedGitHubCredential, () => null)
           ?.credentialFingerprint ?? null,
         Context.getOrElse(context, SourceControlRateLimit.CredentialScope, () => ""),
@@ -1896,7 +1897,11 @@ export const make = Effect.gen(function* () {
     RequestResolver.batchN(STAT_ALIASES_PER_REQUEST),
   );
   const getPullRequestWatchFingerprint: GitHubPullRequestApi["Service"]["getPullRequestWatchFingerprint"] =
-    (input) => Effect.request(new PullRequestWatchFingerprintRead(input), watchFingerprintResolver);
+    (input) =>
+      Effect.request(new PullRequestWatchFingerprintRead(input), watchFingerprintResolver).pipe(
+        GitHubApi.withCredential(api, input.host),
+        inRepository(input.cwd),
+      );
 
   return GitHubPullRequestApi.of({
     withVerifiedCredential,

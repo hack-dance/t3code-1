@@ -30,11 +30,25 @@ function harness(
   hosts: Record<string, { readonly account?: string; readonly enabled?: boolean }> = {},
   signedOut: ReadonlyArray<string> = [],
   tokens: Record<string, string> = {},
-  repositories: Record<string, string> = {},
+  repositories: Record<string, string | number> = {},
 ) {
   const calls: Array<ReadonlyArray<string>> = [];
+  const gitCalls: string[] = [];
   const run: SourceControlHost.SourceControlHost["Service"]["process"]["run"] = (input) =>
     Effect.sync(() => {
+      if (input.command === "git") {
+        gitCalls.push(input.cwd);
+        const value = repositories[input.cwd];
+        return {
+          exitCode: ChildProcessSpawner.ExitCode(
+            typeof value === "number" ? value : value === undefined ? 1 : 0,
+          ),
+          stdout: typeof value === "string" ? value : "",
+          stderr: "",
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        };
+      }
       calls.push(input.args);
       const user = input.args[input.args.indexOf("--user") + 1];
       if (input.args.includes("--user") && user !== undefined && signedOut.includes(user)) {
@@ -61,12 +75,11 @@ function harness(
           sourceControlHosts: { github: { hosts: hostSettings(hosts), tokens } },
         }),
         process: { run },
-        git: { readConfigValue: (cwd) => Effect.succeed(repositories[cwd] ?? null) },
       }),
     ),
     Layer.provide(NodeCrypto.layer),
   );
-  return { layer, calls };
+  return { layer, calls, gitCalls };
 }
 
 describe("GitHubCredentials", () => {
@@ -232,5 +245,50 @@ it.effect("does not fall back to another account when the repo account is signed
     );
     expect(error._tag).toBe("GitHubNotSignedInError");
     expect(calls).toEqual([["auth", "token", "--hostname", "github.com", "--user", "work-user"]]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reuses the repo account lookup for repeated API reads", () => {
+  const { layer, gitCalls } = harness({}, [], {}, { "/repo": "work" });
+  return Effect.gen(function* () {
+    const credentials = yield* GitHubCredentials.GitHubCredentials;
+    for (let i = 0; i < 5; i++)
+      yield* credentials
+        .get("github.com")
+        .pipe(Effect.provideService(GitHubCredentials.RepositoryDirectory, "/repo"));
+    expect(gitCalls).toEqual(["/repo"]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("keeps GitHub.com repo accounts out of Enterprise requests", () => {
+  const { layer, calls, gitCalls } = harness(
+    { "ghe.example.test": { account: "enterprise" } },
+    [],
+    {},
+    { "/repo": "personal" },
+  );
+  return Effect.gen(function* () {
+    const credentials = yield* GitHubCredentials.GitHubCredentials;
+    yield* credentials
+      .get("ghe.example.test")
+      .pipe(Effect.provideService(GitHubCredentials.RepositoryDirectory, "/repo"));
+    expect(calls).toEqual([
+      ["auth", "token", "--hostname", "ghe.example.test", "--user", "enterprise"],
+    ]);
+    expect(gitCalls).toEqual([]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("fails unreadable repo configuration instead of selecting another account", () => {
+  const { layer, calls } = harness({}, [], {}, { "/repo": 128 });
+  return Effect.gen(function* () {
+    const credentials = yield* GitHubCredentials.GitHubCredentials;
+    const error = yield* Effect.flip(
+      credentials
+        .get("github.com")
+        .pipe(Effect.provideService(GitHubCredentials.RepositoryDirectory, "/repo")),
+    );
+    expect(error._tag).toBe("GitHubRepositoryAccountError");
+    expect(calls).toEqual([]);
   }).pipe(Effect.provide(layer));
 });

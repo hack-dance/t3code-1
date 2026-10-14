@@ -316,6 +316,7 @@ function fromGitHubApiError(
       );
     case "GitHubNotSignedInError":
     case "GitHubHostDisabledError":
+    case "GitHubRepositoryAccountError":
       // A missing or turned-off credential already says what to do about it.
       return failure(error.message, error);
     case "GitHubApiAuthenticationError":
@@ -585,7 +586,6 @@ export const make = Effect.gen(function* () {
         request.owner,
         request.name,
         String(request.allowReserve),
-        Context.getOrElse(context, GitHubCredentials.RepositoryDirectory, () => null) ?? "",
         Context.getOrElse(context, GitHubApi.PinnedGitHubCredential, () => null)
           ?.credentialFingerprint ?? "",
         Context.getOrElse(context, SourceControlRateLimit.CredentialScope, () => ""),
@@ -666,6 +666,11 @@ export const make = Effect.gen(function* () {
         allowReserve: input.allowReserve,
       }),
       input.allowReserve ? interactiveHeadResolver : backgroundHeadResolver,
+    ).pipe(
+      GitHubApi.withCredential(api, locator.host),
+      Effect.mapError((error) =>
+        error._tag === "GitHubFailure" ? error : fromGitHubApiError(error),
+      ),
     );
     if (!ownerMatch) return rows;
     const headOwner = ownerMatch[1]!.toLowerCase();

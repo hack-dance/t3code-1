@@ -82,7 +82,18 @@ export type GitHubCredentialUnavailableError =
   | GitHubCliMissingError
   | GitHubNotSignedInError
   | GitHubHostDisabledError
-  | GitHubCliFailedError;
+  | GitHubCliFailedError
+  | GitHubRepositoryAccountError;
+
+/** The account choice could not be read, so another login must not be used. */
+export class GitHubRepositoryAccountError extends Schema.TaggedError<GitHubRepositoryAccountError>()(
+  "GitHubRepositoryAccountError",
+  { cwd: Schema.String, cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return `Could not read \`git config github.user\` in ${this.cwd}. Fix the Git configuration and retry.`;
+  }
+}
 
 /** The checkout for this request. Host discovery does not select a repository account. */
 export const RepositoryDirectory = Context.Reference<string | null>(
@@ -210,13 +221,45 @@ export const make = Effect.gen(function* () {
   const cacheKey = (host: string, account: string | undefined, repository = false) =>
     account === undefined ? host : `${host}\u0000${account}${repository ? "\u0000repo" : ""}`;
 
-  const repositoryAccount = Effect.fn("GitHubCredentials.repositoryAccount")(function* () {
+  const repositoryAccounts = yield* Cache.makeWith(
+    (cwd: string) =>
+      process
+        .run({
+          operation: "GitHubCredentials.repositoryAccount",
+          command: "git",
+          args: ["config", "--get", "github.user"],
+          cwd,
+          allowNonZeroExit: true,
+          timeoutMs: 5_000,
+        })
+        .pipe(
+          Effect.mapError((cause) => new GitHubRepositoryAccountError({ cwd, cause })),
+          Effect.flatMap((output) =>
+            output.exitCode === 0
+              ? Effect.succeed(output.stdout.trim() || undefined)
+              : output.exitCode === 1
+                ? Effect.succeed(undefined)
+                : Effect.fail(
+                    new GitHubRepositoryAccountError({
+                      cwd,
+                      cause: new Error(`Git exited with code ${output.exitCode}.`),
+                    }),
+                  ),
+          ),
+        ),
+    {
+      capacity: 512,
+      timeToLive: (exit) => (Exit.isSuccess(exit) ? Duration.seconds(5) : Duration.zero),
+    },
+  );
+
+  const repositoryAccount = Effect.fn("GitHubCredentials.repositoryAccount")(function* (
+    host: string,
+  ) {
     const cwd = yield* RepositoryDirectory;
-    if (cwd === null) return undefined;
-    return yield* sourceControlHost.git.readConfigValue(cwd, "github.user").pipe(
-      Effect.map((value) => value?.trim() || undefined),
-      Effect.orElseSucceed(() => undefined),
-    );
+    if (host !== "github.com" || cwd === null || environmentToken(host, environment) !== null)
+      return undefined;
+    return yield* Cache.get(repositoryAccounts, cwd);
   });
 
   const lookup = Effect.fn("GitHubCredentials.lookup")(function* (key: string) {
@@ -273,7 +316,7 @@ export const make = Effect.gen(function* () {
           fingerprint: yield* fingerprintOf(host, saved),
         } satisfies GitHubCredential;
       }
-      const account = yield* repositoryAccount();
+      const account = yield* repositoryAccount(host);
       return yield* Cache.get(
         cache,
         cacheKey(host, account ?? choice?.account, account !== undefined),
@@ -282,7 +325,7 @@ export const make = Effect.gen(function* () {
     invalidate: Effect.fn("GitHubCredentials.invalidate")(function* (rawHost) {
       const host = normalizeHost(rawHost);
       const choice = yield* hostChoice(host);
-      const account = yield* repositoryAccount();
+      const account = yield* repositoryAccount(host).pipe(Effect.orElseSucceed(() => undefined));
       yield* Cache.invalidate(
         cache,
         cacheKey(host, account ?? choice?.account, account !== undefined),

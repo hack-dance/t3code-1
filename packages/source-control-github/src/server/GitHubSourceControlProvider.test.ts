@@ -7,6 +7,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
@@ -129,7 +130,11 @@ function harness(input: {
   });
   const layer = Layer.mergeAll(
     host,
-    Layer.mock(GitHubApi.GitHubApi)(input.api),
+    Layer.mock(GitHubApi.GitHubApi)({
+      credential: () =>
+        Effect.succeed({ token: Redacted.make("fake-token"), fingerprint: "default" }),
+      ...input.api,
+    }),
     NodeServices.layer,
   );
   return { layer, git };
@@ -1257,32 +1262,51 @@ it.effect(
   },
 );
 
-it.effect(
-  "keeps simultaneous lookups from different checkouts in separate account contexts",
-  () => {
-    const directories: Array<string | null> = [];
-    const { layer } = harness({
-      remotes: remotesOutput(["origin", "https://github.com/acme/web.git"]),
-      api: {
-        graphql: () =>
-          Effect.gen(function* () {
-            directories.push(yield* GitHubCredentials.RepositoryDirectory);
-            return encodeJson({ data: { repository: { h0: { nodes: [node(7, "feature")] } } } });
-          }),
-      },
-    });
-    return Effect.gen(function* () {
-      const provider = yield* GitHubSourceControlProvider.make;
-      const pending = yield* Effect.forEach(
-        ["/personal", "/work"],
-        (cwd) => provider.listChangeRequests({ cwd, headSelector: "feature", state: "open" }),
-        { concurrency: "unbounded" },
-      ).pipe(Effect.forkChild);
-      yield* TestClock.adjust("50 millis");
-      yield* Fiber.join(pending);
-      assert.deepStrictEqual(directories.toSorted(), ["/personal", "/work"]);
-    }).pipe(Effect.provide(layer));
-  },
+it.effect("batches matching accounts across checkouts and separates different accounts", () =>
+  Effect.gen(function* () {
+    for (const differentAccounts of [false, true]) {
+      const fingerprints: string[] = [];
+      const { layer } = harness({
+        remotes: remotesOutput(["origin", "https://github.com/acme/web.git"]),
+        api: {
+          credential: () =>
+            Effect.gen(function* () {
+              const cwd = yield* GitHubCredentials.RepositoryDirectory;
+              return {
+                token: Redacted.make("fake-token"),
+                fingerprint: differentAccounts ? String(cwd) : "same-account",
+              };
+            }),
+          graphql: () =>
+            Effect.gen(function* () {
+              fingerprints.push((yield* GitHubApi.PinnedGitHubCredential)!.credentialFingerprint);
+              return encodeJson({
+                data: {
+                  repository: {
+                    h0: { nodes: [node(7, "feature")] },
+                    h1: { nodes: [node(7, "feature")] },
+                  },
+                },
+              });
+            }),
+        },
+      });
+      yield* Effect.gen(function* () {
+        const provider = yield* GitHubSourceControlProvider.make;
+        const pending = yield* Effect.forEach(
+          ["/personal", "/work"],
+          (cwd) => provider.listChangeRequests({ cwd, headSelector: "feature", state: "open" }),
+          { concurrency: "unbounded" },
+        ).pipe(Effect.forkChild);
+        yield* TestClock.adjust("50 millis");
+        assert.deepStrictEqual(
+          (yield* Fiber.join(pending)).map((rows) => rows.map((pr) => pr.number)),
+          [[7], [7]],
+        );
+        assert.strictEqual(fingerprints.length, differentAccounts ? 2 : 1);
+      }).pipe(Effect.provide(layer));
+    }
+  }),
 );
 
 it.effect("records the API host in repository identities while keeping the SSH locator", () => {

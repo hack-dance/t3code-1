@@ -31,12 +31,12 @@ If `gh` is signed in to several accounts or hosts, expand **GitHub** in the same
 the account each host uses or turn a host off. A saved token or `GH_TOKEN` takes precedence
 over that choice; a host turned off stays off either way.
 
-To select a GitHub CLI account for one repository, run `git config --local github.user YOUR_LOGIN`
+To select a GitHub.com CLI account for one repository, run `git config --local github.user YOUR_LOGIN`
 in that checkout. This overrides the host account selected in Settings; saved and environment
 tokens still take precedence. Remove the override with `git config --unset github.user`.
 T3 reads the effective Git configuration, so global values and conditional includes also apply.
 If the chosen account is signed out, requests fail instead of using another account.
-SSH remotes use the `HostName` from the server's SSH configuration for API requests and keep
+GitHub.com SSH aliases use the `HostName` from the server's SSH configuration for API requests and keep
 the alias for Git operations.
 
 For GitHub Enterprise, sign in with `gh auth login --hostname YOUR_HOST`. T3 Code treats a

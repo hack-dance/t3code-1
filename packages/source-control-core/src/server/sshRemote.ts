@@ -1,5 +1,4 @@
 import * as Effect from "effect/Effect";
-import * as NodeNet from "node:net";
 import { isSshRemoteUrl } from "@t3tools/shared/sourceControl";
 import type * as SourceControlHost from "./SourceControlHost.ts";
 
@@ -10,11 +9,6 @@ const PUBLIC_HOSTS = new Set([
   "bitbucket.org",
   "codeberg.org",
   "ssh.dev.azure.com",
-]);
-const SSH_TRANSPORT_HOSTS = new Map([
-  ["ssh.github.com", "github.com"],
-  ["altssh.gitlab.com", "gitlab.com"],
-  ["altssh.bitbucket.org", "bitbucket.org"],
 ]);
 
 /** Keeps the original repository path when replacing the host. */
@@ -59,7 +53,7 @@ function readSshHostname(stdout: string) {
   }
 }
 
-/** Resolves an SSH alias for provider lookup. Git keeps its original remote URL. */
+/** Resolves github.com SSH aliases for API lookup. Other hosts keep their existing routing. */
 export const resolveSshRemoteUrl = Effect.fn("resolveSshRemoteUrl")(function* (input: {
   readonly remoteUrl: string;
   readonly cwd: string;
@@ -91,13 +85,8 @@ export const resolveSshRemoteUrl = Effect.fn("resolveSshRemoteUrl")(function* (i
 
   const resolvedHostname =
     output?.exitCode === 0 ? readSshHostname(output.stdout)?.toLowerCase() : undefined;
-  if (
-    resolvedHostname === undefined ||
-    !SSH_HOSTNAME_PATTERN.test(resolvedHostname) ||
-    NodeNet.isIP(resolvedHostname)
-  )
+  if (resolvedHostname !== "github.com" && resolvedHostname !== "ssh.github.com")
     return input.remoteUrl;
-  const hostname = SSH_TRANSPORT_HOSTS.get(resolvedHostname) ?? resolvedHostname;
 
-  return `${remote.prefix}${hostname}${remote.suffix}`;
+  return `${remote.prefix}github.com${remote.suffix}`;
 });
