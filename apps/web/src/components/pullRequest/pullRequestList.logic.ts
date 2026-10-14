@@ -146,7 +146,7 @@ export function pullRequestEntryViewer(
 ): string | null {
   // The environment's own answer first; a plain host key is what a single-environment listing
   // still writes, and what the snapshot from one carries.
-  return normalize(viewers[pullRequestViewerKey(entry)] ?? viewers[entry.host]);
+  return normalize(entry.viewer ?? viewers[pullRequestViewerKey(entry)] ?? viewers[entry.host]);
 }
 
 /**

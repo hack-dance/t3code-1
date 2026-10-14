@@ -43,6 +43,7 @@ import {
 } from "@t3tools/contracts";
 
 import * as GitHubApi from "./GitHubApi.ts";
+import * as GitHubCredentials from "./GitHubCredentials.ts";
 import { readGraphQlPages } from "./githubGraphQl.ts";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
@@ -484,7 +485,7 @@ export class GitHubPullRequestApi extends Context.Service<
   GitHubPullRequestApi,
   {
     readonly withVerifiedCredential: <A, E, R>(
-      input: { readonly cwd: string; readonly host: string },
+      input: { readonly cwd: string; readonly host: string; readonly allowReserve?: boolean },
       use: (identity: {
         readonly accountId: string;
         readonly viewer: string;
@@ -1192,6 +1193,10 @@ export const make = Effect.gen(function* () {
   const sourceControlHost = yield* SourceControlHost.SourceControlHost;
   const fileSystem = yield* FileSystem.FileSystem;
   const revalidateChecks = yield* makeChecksRevalidator;
+  const inRepository = (cwd: string) =>
+    Effect.provideService(GitHubCredentials.RepositoryDirectory, cwd);
+  const rest = (input: GitHubApi.GitHubRestInput & { readonly cwd: string }) =>
+    api.rest(input).pipe(inRepository(input.cwd));
   const routingIdentities = new Map<
     string,
     {
@@ -1209,11 +1214,17 @@ export const make = Effect.gen(function* () {
     ),
   );
   const captureVerifiedCredential = Effect.fn("GitHubPullRequestApi.captureVerifiedCredential")(
-    function* (input: { readonly cwd: string; readonly host: string }) {
+    function* (input: {
+      readonly cwd: string;
+      readonly host: string;
+      readonly allowReserve?: boolean;
+    }) {
       const unavailable = () => new GitHubViewerLoginUnavailableError({ cwd: input.cwd });
       const host = input.host.toLowerCase();
       // A missing or signed-out credential keeps its own error, so the page can say which.
-      const { token, fingerprint: key } = yield* api.credential(host);
+      const { token, fingerprint: key } = yield* api
+        .credential(host)
+        .pipe(Effect.provideService(GitHubCredentials.RepositoryDirectory, input.cwd));
       const credential = { host, token, credentialFingerprint: key };
       // A cold page may ask several times. Wait per credential and check again after the
       // first verification; cancellation releases the next waiter without losing its request.
@@ -1232,12 +1243,16 @@ export const make = Effect.gen(function* () {
               if (cached !== undefined && now - cached.at < 10 * 60_000)
                 return { ...credential, ...cached.value };
               // Pin this read so an auth switch cannot poison its cache entry.
-              const response = yield* api
-                .rest({ host, operation: "getRoutingIdentity", path: "user", allowReserve: true })
-                .pipe(
-                  Effect.provideService(GitHubApi.PinnedGitHubCredential, credential),
-                  Effect.provideService(SourceControlRateLimit.CredentialScope, key),
-                );
+              const response = yield* rest({
+                cwd: input.cwd,
+                host,
+                operation: "getRoutingIdentity",
+                path: "user",
+                allowReserve: input.allowReserve ?? true,
+              }).pipe(
+                Effect.provideService(GitHubApi.PinnedGitHubCredential, credential),
+                Effect.provideService(SourceControlRateLimit.CredentialScope, key),
+              );
               const identity = yield* decodeRoutingIdentity(response.body).pipe(
                 Effect.mapError(unavailable),
               );
@@ -1263,6 +1278,7 @@ export const make = Effect.gen(function* () {
     captureVerifiedCredential(input).pipe(
       Effect.flatMap(({ host, token, accountId, viewer, credentialFingerprint }) =>
         use({ accountId, viewer, credentialFingerprint }).pipe(
+          Effect.provideService(GitHubCredentials.RepositoryDirectory, input.cwd),
           Effect.provideService(SourceControlRateLimit.CredentialScope, credentialFingerprint),
           Effect.provideService(GitHubApi.PinnedGitHubCredential, {
             host,
@@ -1353,11 +1369,12 @@ export const make = Effect.gen(function* () {
 
   /** A GraphQL mutation whose answer is not read back; a GraphQL error fails it. */
   const graphql = (input: {
+    readonly cwd: string;
     readonly host: string;
     readonly operation: string;
     readonly query: string;
     readonly variables: Readonly<Record<string, unknown>>;
-  }) => api.graphql(input).pipe(Effect.asVoid);
+  }) => api.graphql(input).pipe(Effect.asVoid, inRepository(input.cwd));
 
   const readError = (cwd: string, operation: string, cause: unknown) =>
     new GitHubPullRequestReadError({ cwd, operation, cause });
@@ -1393,7 +1410,10 @@ export const make = Effect.gen(function* () {
         ...(input.variables === undefined ? {} : { variables: input.variables }),
         ...(input.allowReserve === true ? { allowReserve: true } : {}),
       })
-      .pipe(Effect.flatMap((raw) => decodeWith(input.cwd, input.operation, input.decode, raw)));
+      .pipe(
+        Effect.flatMap((raw) => decodeWith(input.cwd, input.operation, input.decode, raw)),
+        inRepository(input.cwd),
+      );
 
   /** A REST read whose JSON answer is decoded the same way. */
   const restRead = <A>(input: {
@@ -1403,13 +1423,16 @@ export const make = Effect.gen(function* () {
     readonly path: string;
     readonly decode: (raw: string) => Result.Result<A, unknown>;
   }): Effect.Effect<A, GitHubPullRequestApiError> =>
-    api
-      .rest({ host: input.host, operation: input.operation, path: input.path })
-      .pipe(
-        Effect.flatMap((response) =>
-          decodeWith(input.cwd, input.operation, input.decode, response.body),
-        ),
-      );
+    rest({
+      cwd: input.cwd,
+      host: input.host,
+      operation: input.operation,
+      path: input.path,
+    }).pipe(
+      Effect.flatMap((response) =>
+        decodeWith(input.cwd, input.operation, input.decode, response.body),
+      ),
+    );
 
   /**
    * One page of the patch, read from the files API. GitHub refuses a whole diff past 300 changed
@@ -1431,53 +1454,52 @@ export const make = Effect.gen(function* () {
   }): Effect.Effect<GitHubPullRequestDiffSlice, GitHubPullRequestApiError> => {
     const { owner, name } = parseRepositorySelector(input.repository);
     const paging = `per_page=${DIFF_FILES_PAGE_SIZE}&page=${input.page}`;
-    return api
-      .rest({
-        host: input.host,
-        operation: "getPullRequestDiff",
-        path:
-          input.commit === undefined
-            ? `repos/${owner}/${name}/pulls/${input.number}/files?${paging}`
-            : `repos/${owner}/${name}/commits/${input.commit}?${paging}`,
-        maxResponseBytes: DIFF_MAX_OUTPUT_BYTES,
-        timeout: DIFF_TIMEOUT,
-      })
-      .pipe(
-        Effect.flatMap((response) => {
-          // Checked before decoding: a byte-truncated response is a JSON prefix, which would
-          // fail to parse. Nothing of this page can be shown, and an empty patch would render
-          // as a change with no files rather than as the failure it is; slices already handed
-          // over stay with the reader either way.
-          if (response.truncated) {
-            return Effect.fail(
-              readError(
-                input.cwd,
-                "getPullRequestDiff",
-                new Error(`Page ${input.page} of the changed files was too large to read.`),
-              ),
-            );
-          }
-          return decodeWith(
-            input.cwd,
-            "getPullRequestDiff",
-            input.commit === undefined ? decodePullRequestFilesJson : decodeCommitFilesJson,
-            response.body,
+    return rest({
+      cwd: input.cwd,
+      host: input.host,
+      operation: "getPullRequestDiff",
+      path:
+        input.commit === undefined
+          ? `repos/${owner}/${name}/pulls/${input.number}/files?${paging}`
+          : `repos/${owner}/${name}/commits/${input.commit}?${paging}`,
+      maxResponseBytes: DIFF_MAX_OUTPUT_BYTES,
+      timeout: DIFF_TIMEOUT,
+    }).pipe(
+      Effect.flatMap((response) => {
+        // Checked before decoding: a byte-truncated response is a JSON prefix, which would
+        // fail to parse. Nothing of this page can be shown, and an empty patch would render
+        // as a change with no files rather than as the failure it is; slices already handed
+        // over stay with the reader either way.
+        if (response.truncated) {
+          return Effect.fail(
+            readError(
+              input.cwd,
+              "getPullRequestDiff",
+              new Error(`Page ${input.page} of the changed files was too large to read.`),
+            ),
           );
-        }),
-        Effect.map((files) => {
-          // Counted before decoding, so a page whose files all failed to decode still moves on
-          // rather than pointing the reader back at the page it just read.
-          const morePages = files.rawCount >= DIFF_FILES_PAGE_SIZE;
-          return {
-            patch: files.patch,
-            truncated: files.truncated,
-            nextCursor: morePages ? String(input.page + 1) : null,
-            ...(files.omittedFileStats.length === 0
-              ? {}
-              : { omittedFileStats: files.omittedFileStats }),
-          };
-        }),
-      );
+        }
+        return decodeWith(
+          input.cwd,
+          "getPullRequestDiff",
+          input.commit === undefined ? decodePullRequestFilesJson : decodeCommitFilesJson,
+          response.body,
+        );
+      }),
+      Effect.map((files) => {
+        // Counted before decoding, so a page whose files all failed to decode still moves on
+        // rather than pointing the reader back at the page it just read.
+        const morePages = files.rawCount >= DIFF_FILES_PAGE_SIZE;
+        return {
+          patch: files.patch,
+          truncated: files.truncated,
+          nextCursor: morePages ? String(input.page + 1) : null,
+          ...(files.omittedFileStats.length === 0
+            ? {}
+            : { omittedFileStats: files.omittedFileStats }),
+        };
+      }),
+    );
   };
 
   const getPullRequestDiffFileContents: GitHubPullRequestApi["Service"]["getPullRequestDiffFileContents"] =
@@ -1487,7 +1509,8 @@ export const make = Effect.gen(function* () {
           return yield* new GitHubDiffCommitError({ cwd: input.cwd });
         }
         const { owner, name } = parseRepositorySelector(input.repository);
-        const refsResponse = yield* api.rest({
+        const refsResponse = yield* rest({
+          cwd: input.cwd,
           host: input.host,
           operation: "getPullRequestDiffFileContents",
           path:
@@ -1524,31 +1547,30 @@ export const make = Effect.gen(function* () {
         }
 
         const readFile = (revision: string, filePath: string) =>
-          api
-            .rest({
-              host: input.host,
-              operation: "getPullRequestDiffFileContents",
-              accept: "application/vnd.github.raw+json",
-              path: `repos/${owner}/${name}/contents/${filePath
-                .split("/")
-                .map(encodeURIComponent)
-                .join("/")}?ref=${encodeURIComponent(revision)}`,
-              maxResponseBytes: DIFF_FILE_MAX_OUTPUT_BYTES,
-              timeout: DIFF_TIMEOUT,
-            })
-            .pipe(
-              Effect.flatMap((response) =>
-                response.truncated || response.body.includes("\0") || response.invalidUtf8
-                  ? Effect.fail(
-                      new GitHubDiffFileContentsUnavailableError({
-                        cwd: input.cwd,
-                        path: filePath,
-                        reason: response.truncated ? "oversized" : "binary",
-                      }),
-                    )
-                  : Effect.succeed(response.body),
-              ),
-            );
+          rest({
+            cwd: input.cwd,
+            host: input.host,
+            operation: "getPullRequestDiffFileContents",
+            accept: "application/vnd.github.raw+json",
+            path: `repos/${owner}/${name}/contents/${filePath
+              .split("/")
+              .map(encodeURIComponent)
+              .join("/")}?ref=${encodeURIComponent(revision)}`,
+            maxResponseBytes: DIFF_FILE_MAX_OUTPUT_BYTES,
+            timeout: DIFF_TIMEOUT,
+          }).pipe(
+            Effect.flatMap((response) =>
+              response.truncated || response.body.includes("\0") || response.invalidUtf8
+                ? Effect.fail(
+                    new GitHubDiffFileContentsUnavailableError({
+                      cwd: input.cwd,
+                      path: filePath,
+                      reason: response.truncated ? "oversized" : "binary",
+                    }),
+                  )
+                : Effect.succeed(response.body),
+            ),
+          );
 
         const [oldContents, newContents] = yield* Effect.all(
           [
@@ -1906,7 +1928,10 @@ export const make = Effect.gen(function* () {
     RequestResolver.batchN(STAT_ALIASES_PER_REQUEST),
   );
   const getPullRequestSummary: GitHubPullRequestApi["Service"]["getPullRequestSummary"] = (input) =>
-    Effect.request(new PullRequestSummaryRead(input), summaryResolver);
+    Effect.request(new PullRequestSummaryRead(input), summaryResolver).pipe(
+      GitHubApi.withCredential(api, input.host),
+      inRepository(input.cwd),
+    );
 
   // Every watched pull request on a host in one read per pass. A pull request the batch has no
   // answer for gets null, and its watch reads it in full; a failed batch fails every entry.
@@ -1960,7 +1985,11 @@ export const make = Effect.gen(function* () {
     RequestResolver.batchN(STAT_ALIASES_PER_REQUEST),
   );
   const getPullRequestWatchFingerprint: GitHubPullRequestApi["Service"]["getPullRequestWatchFingerprint"] =
-    (input) => Effect.request(new PullRequestWatchFingerprintRead(input), watchFingerprintResolver);
+    (input) =>
+      Effect.request(new PullRequestWatchFingerprintRead(input), watchFingerprintResolver).pipe(
+        GitHubApi.withCredential(api, input.host),
+        inRepository(input.cwd),
+      );
 
   return GitHubPullRequestApi.of({
     withVerifiedCredential,
@@ -2309,35 +2338,34 @@ export const make = Effect.gen(function* () {
         return filesPage(1);
       }
       const { owner, name } = parseRepositorySelector(input.repository);
-      return api
-        .rest({
-          host: input.host,
-          operation: "getPullRequestDiff",
-          path: `repos/${owner}/${name}/pulls/${input.number}`,
-          accept: "application/vnd.github.diff",
-          maxResponseBytes: DIFF_MAX_OUTPUT_BYTES,
-          timeout: DIFF_TIMEOUT,
-        })
-        .pipe(
-          Effect.flatMap((response) =>
-            // A patch cut at a byte boundary ends mid-file, which is neither a whole slice nor
-            // something the reader can carry on from. The files API can serve the same change a
-            // whole number of files at a time, so an oversized patch takes that road as well.
-            response.truncated
-              ? filesPage(1)
-              : // One read served the whole patch, so there is no next slice to ask for.
-                Effect.succeed({ patch: response.body, truncated: false, nextCursor: null }),
-          ),
-          // GitHub answers 406 rather than a diff past 300 changed files, so the patch is read
-          // from the files API instead, a page per call. Only once the direct read has failed: a
-          // pull request GitHub will serve a diff for must not pay for a second request. A
-          // fallback that fails too reports the original refusal, which is the one that explains
-          // the page. Narrowed to a request GitHub answered and refused: a missing credential or
-          // a rate limit fails the same way for every request.
-          Effect.catchTags({
-            GitHubApiResponseError: (error) => filesPage(1).pipe(Effect.mapError(() => error)),
-          }),
-        );
+      return rest({
+        cwd: input.cwd,
+        host: input.host,
+        operation: "getPullRequestDiff",
+        path: `repos/${owner}/${name}/pulls/${input.number}`,
+        accept: "application/vnd.github.diff",
+        maxResponseBytes: DIFF_MAX_OUTPUT_BYTES,
+        timeout: DIFF_TIMEOUT,
+      }).pipe(
+        Effect.flatMap((response) =>
+          // A patch cut at a byte boundary ends mid-file, which is neither a whole slice nor
+          // something the reader can carry on from. The files API can serve the same change a
+          // whole number of files at a time, so an oversized patch takes that road as well.
+          response.truncated
+            ? filesPage(1)
+            : // One read served the whole patch, so there is no next slice to ask for.
+              Effect.succeed({ patch: response.body, truncated: false, nextCursor: null }),
+        ),
+        // GitHub answers 406 rather than a diff past 300 changed files, so the patch is read
+        // from the files API instead, a page per call. Only once the direct read has failed: a
+        // pull request GitHub will serve a diff for must not pay for a second request. A
+        // fallback that fails too reports the original refusal, which is the one that explains
+        // the page. Narrowed to a request GitHub answered and refused: a missing credential or
+        // a rate limit fails the same way for every request.
+        Effect.catchTags({
+          GitHubApiResponseError: (error) => filesPage(1).pipe(Effect.mapError(() => error)),
+        }),
+      );
     },
 
     getPullRequestDiffFileContents,
@@ -2523,15 +2551,14 @@ export const make = Effect.gen(function* () {
       const { owner, name } = parseRepositorySelector(input.repository);
       // Posting to a login GitHub has already been asked about is what a re-request is, so
       // there is nothing to say here about somebody who has reviewed once already.
-      return api
-        .rest({
-          host: input.host,
-          operation: "setReviewerRequest",
-          method: input.requested ? "POST" : "DELETE",
-          path: `repos/${owner}/${name}/pulls/${input.number}/requested_reviewers`,
-          body: buildReviewerRequest(input.reviewers),
-        })
-        .pipe(Effect.asVoid);
+      return rest({
+        cwd: input.cwd,
+        host: input.host,
+        operation: "setReviewerRequest",
+        method: input.requested ? "POST" : "DELETE",
+        path: `repos/${owner}/${name}/pulls/${input.number}/requested_reviewers`,
+        body: buildReviewerRequest(input.reviewers),
+      }).pipe(Effect.asVoid);
     },
 
     listLabelCandidates: (input) => {
@@ -2554,20 +2581,20 @@ export const make = Effect.gen(function* () {
       // path. The name goes into the path encoded, because a label may carry a space or a slash.
       const issue = `repos/${owner}/${name}/issues/${input.number}/labels`;
       if (input.applied) {
-        return api
-          .rest({
-            host: input.host,
-            operation: "setLabels",
-            method: "POST",
-            path: issue,
-            body: buildLabelRequest(input.labels),
-          })
-          .pipe(Effect.asVoid);
+        return rest({
+          cwd: input.cwd,
+          host: input.host,
+          operation: "setLabels",
+          method: "POST",
+          path: issue,
+          body: buildLabelRequest(input.labels),
+        }).pipe(Effect.asVoid);
       }
       return Effect.forEach(
         input.labels,
         (label) =>
-          api.rest({
+          rest({
+            cwd: input.cwd,
             host: input.host,
             operation: "setLabels",
             method: "DELETE",
@@ -2674,6 +2701,7 @@ export const make = Effect.gen(function* () {
       }
       if (input.stackNumber !== undefined)
         return runGitHubStackAction({ ...input, stackNumber: input.stackNumber }).pipe(
+          inRepository(input.cwd),
           Effect.provideService(GitHubApi.GitHubApi, api),
           Effect.provideService(SourceControlHost.SourceControlHost, sourceControlHost),
           Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -2682,6 +2710,7 @@ export const make = Effect.gen(function* () {
         return pullRequestNodeId({ ...input, operation: "revertPullRequest" }).pipe(
           Effect.flatMap((pullRequestId) =>
             graphql({
+              cwd: input.cwd,
               host: input.host,
               operation: "revertPullRequest",
               query: REVERT_PULL_REQUEST_GRAPHQL_MUTATION,
@@ -2751,14 +2780,13 @@ export const make = Effect.gen(function* () {
                       }),
                       Effect.flatMap((currentRuns) =>
                         currentRuns.some((current) => current.id === run.id)
-                          ? api
-                              .rest({
-                                host: input.host,
-                                operation: "approveWorkflowRun",
-                                method: "POST",
-                                path: `repos/${owner}/${name}/actions/runs/${run.id}/approve`,
-                              })
-                              .pipe(Effect.asVoid)
+                          ? rest({
+                              cwd: input.cwd,
+                              host: input.host,
+                              operation: "approveWorkflowRun",
+                              method: "POST",
+                              path: `repos/${owner}/${name}/actions/runs/${run.id}/approve`,
+                            }).pipe(Effect.asVoid)
                           : Effect.void,
                       ),
                     ),
@@ -2774,6 +2802,7 @@ export const make = Effect.gen(function* () {
         return pullRequestNodeId({ ...input, operation: "runPullRequestAction" }).pipe(
           Effect.flatMap((pullRequestId) =>
             graphql({
+              cwd: input.cwd,
               host: input.host,
               operation: "runPullRequestAction",
               query: SIMPLE_ACTION_MUTATIONS[action as keyof typeof SIMPLE_ACTION_MUTATIONS],
@@ -2805,6 +2834,7 @@ export const make = Effect.gen(function* () {
           if (state.baseRef?.compare?.behindBy === 0) return;
           // GitHub updates with a merge commit unless asked to rebase, which is its own default.
           return yield* graphql({
+            cwd: input.cwd,
             host: input.host,
             operation: "runPullRequestAction",
             query: UPDATE_BRANCH_GRAPHQL_MUTATION,
@@ -2850,6 +2880,7 @@ export const make = Effect.gen(function* () {
           (action === "enable-auto-merge" &&
             !IMMEDIATELY_MERGEABLE.has(state.mergeStateStatus?.toUpperCase() ?? ""));
         yield* graphql({
+          cwd: input.cwd,
           host: input.host,
           operation: "runPullRequestAction",
           query: auto ? ENABLE_AUTO_MERGE_GRAPHQL_MUTATION : MERGE_PULL_REQUEST_GRAPHQL_MUTATION,
@@ -2869,6 +2900,7 @@ export const make = Effect.gen(function* () {
       pullRequestNodeId({ ...input, operation: "commentOnPullRequest" }).pipe(
         Effect.flatMap((subjectId) =>
           graphql({
+            cwd: input.cwd,
             host: input.host,
             operation: "commentOnPullRequest",
             query: ADD_COMMENT_GRAPHQL_MUTATION,
@@ -2881,23 +2913,23 @@ export const make = Effect.gen(function* () {
       const { owner, name } = parseRepositorySelector(input.repository);
       // The whole review is one request, so nothing is visible to anyone else until the verdict
       // is sent.
-      return api
-        .rest({
-          host: input.host,
-          operation: "submitReview",
-          method: "POST",
-          path: `repos/${owner}/${name}/pulls/${input.number}/reviews`,
-          body: buildReviewSubmission({
-            verdict: input.verdict,
-            body: input.body,
-            comments: input.comments,
-          }),
-        })
-        .pipe(Effect.asVoid);
+      return rest({
+        cwd: input.cwd,
+        host: input.host,
+        operation: "submitReview",
+        method: "POST",
+        path: `repos/${owner}/${name}/pulls/${input.number}/reviews`,
+        body: buildReviewSubmission({
+          verdict: input.verdict,
+          body: input.body,
+          comments: input.comments,
+        }),
+      }).pipe(Effect.asVoid);
     },
 
     replyToReviewThread: (input) =>
       graphql({
+        cwd: input.cwd,
         host: input.host,
         operation: "replyToReviewThread",
         query: REVIEW_THREAD_REPLY_GRAPHQL_MUTATION,
@@ -2932,13 +2964,19 @@ export const make = Effect.gen(function* () {
           const mutation = buildSetFilesViewedGraphQlMutation(pullRequestId, input.files);
           return mutation === null
             ? Effect.void
-            : graphql({ host: input.host, operation: "setPullRequestFilesViewed", ...mutation });
+            : graphql({
+                cwd: input.cwd,
+                host: input.host,
+                operation: "setPullRequestFilesViewed",
+                ...mutation,
+              });
         }),
       );
     },
 
     setReviewThreadResolution: (input) =>
       graphql({
+        cwd: input.cwd,
         host: input.host,
         operation: "setReviewThreadResolution",
         query: input.resolved
@@ -2971,6 +3009,7 @@ export const make = Effect.gen(function* () {
       return subjectId.pipe(
         Effect.flatMap((subjectId) =>
           graphql({
+            cwd: input.cwd,
             host: input.host,
             operation: "setReaction",
             query: input.reacted ? ADD_REACTION_GRAPHQL_MUTATION : REMOVE_REACTION_GRAPHQL_MUTATION,
@@ -2984,6 +3023,7 @@ export const make = Effect.gen(function* () {
       pullRequestNodeId({ ...input, operation: "updatePullRequest" }).pipe(
         Effect.flatMap((pullRequestId) =>
           graphql({
+            cwd: input.cwd,
             host: input.host,
             operation: "updatePullRequest",
             query: UPDATE_PULL_REQUEST_GRAPHQL_MUTATION,
@@ -3019,6 +3059,7 @@ export const make = Effect.gen(function* () {
         ),
         Effect.flatMap((commentId) =>
           graphql({
+            cwd: input.cwd,
             host: input.host,
             operation: "updateComment",
             query:

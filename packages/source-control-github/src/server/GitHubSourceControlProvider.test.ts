@@ -7,6 +7,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
@@ -80,6 +81,7 @@ function harness(input: {
   readonly api: Partial<GitHubApi.GitHubApi["Service"]>;
   readonly localBranches?: ReadonlyArray<string>;
   readonly resolved?: string;
+  readonly sshHostname?: string;
   /** Fails the local branch listing, the first git read a checkout makes. */
   readonly gitFailure?: unknown;
 }) {
@@ -118,15 +120,21 @@ function harness(input: {
     process: {
       run: (args) =>
         Effect.succeed(
-          args.args[0] === "remote"
-            ? processOutput(input.remotes)
-            : processOutput(input.resolved ?? "", input.resolved ? 0 : 1),
+          args.command === "ssh" && input.sshHostname
+            ? processOutput(`hostname ${input.sshHostname}\n`)
+            : args.args[0] === "remote"
+              ? processOutput(input.remotes)
+              : processOutput(input.resolved ?? "", input.resolved ? 0 : 1),
         ),
     },
   });
   const layer = Layer.mergeAll(
     host,
-    Layer.mock(GitHubApi.GitHubApi)(input.api),
+    Layer.mock(GitHubApi.GitHubApi)({
+      credential: () =>
+        Effect.succeed({ token: Redacted.make("fake-token"), fingerprint: "default" }),
+      ...input.api,
+    }),
     NodeServices.layer,
   );
   return { layer, git };
@@ -1217,3 +1225,112 @@ it.effect.each([
     );
   },
 );
+
+it.effect(
+  "lists change requests on a dotted alias's configured API host with the checkout context",
+  () => {
+    const hosts: string[] = [];
+    const { layer } = harness({
+      remotes: remotesOutput(["origin", "git@github.com-work:acme/web.git"]),
+      sshHostname: "github.com",
+      api: {
+        graphql: (input) =>
+          Effect.gen(function* () {
+            assert.strictEqual(yield* GitHubCredentials.RepositoryDirectory, "/repo");
+            hosts.push(input.host);
+            return encodeJson({
+              data: { repository: { h0: { nodes: [node(7, "feature")] } } },
+            });
+          }),
+      },
+    });
+    return Effect.gen(function* () {
+      const provider = yield* GitHubSourceControlProvider.make;
+      const pending = yield* provider
+        .listChangeRequests({
+          cwd: "/repo",
+          context: githubContext("github.com-work"),
+          headSelector: "feature",
+          state: "open",
+        })
+        .pipe(Effect.forkChild);
+      yield* TestClock.adjust("50 millis");
+      const requests = yield* Fiber.join(pending);
+      assert.strictEqual(requests[0]?.number, 7);
+      assert.deepStrictEqual(hosts, ["github.com"]);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect("batches matching accounts across checkouts and separates different accounts", () =>
+  Effect.gen(function* () {
+    for (const differentAccounts of [false, true]) {
+      const fingerprints: string[] = [];
+      const { layer } = harness({
+        remotes: remotesOutput(["origin", "https://github.com/acme/web.git"]),
+        api: {
+          credential: () =>
+            Effect.gen(function* () {
+              const cwd = yield* GitHubCredentials.RepositoryDirectory;
+              return {
+                token: Redacted.make("fake-token"),
+                fingerprint: differentAccounts ? String(cwd) : "same-account",
+              };
+            }),
+          graphql: () =>
+            Effect.gen(function* () {
+              fingerprints.push((yield* GitHubApi.PinnedGitHubCredential)!.credentialFingerprint);
+              return encodeJson({
+                data: {
+                  repository: {
+                    h0: { nodes: [node(7, "feature")] },
+                    h1: { nodes: [node(7, "feature")] },
+                  },
+                },
+              });
+            }),
+        },
+      });
+      yield* Effect.gen(function* () {
+        const provider = yield* GitHubSourceControlProvider.make;
+        const pending = yield* Effect.forEach(
+          ["/personal", "/work"],
+          (cwd) => provider.listChangeRequests({ cwd, headSelector: "feature", state: "open" }),
+          { concurrency: "unbounded" },
+        ).pipe(Effect.forkChild);
+        yield* TestClock.adjust("50 millis");
+        assert.deepStrictEqual(
+          (yield* Fiber.join(pending)).map((rows) => rows.map((pr) => pr.number)),
+          [[7], [7]],
+        );
+        assert.strictEqual(fingerprints.length, differentAccounts ? 2 : 1);
+      }).pipe(Effect.provide(layer));
+    }
+  }),
+);
+
+it.effect("records the API host in repository identities while keeping the SSH locator", () => {
+  const { layer } = harness({ remotes: "", api: {}, sshHostname: "github.com" });
+  return Effect.gen(function* () {
+    const provider = yield* GitHubSourceControlProvider.make;
+    const identity = {
+      canonicalKey: "github.com-work/acme/web",
+      provider: "github",
+      rootPath: "/work repo",
+      displayName: "acme/web",
+      locator: {
+        source: "git-remote" as const,
+        remoteName: "upstream",
+        remoteUrl: "git@github.com-work:acme/web.git",
+      },
+      origin: { canonicalKey: "github.com-work/fake-user/web", displayName: "fake-user/web" },
+    };
+    const refined = yield* provider.refineRepositoryIdentity!({
+      identity,
+      resolveContext: () => Effect.die("unused"),
+    });
+    assert.strictEqual(refined.canonicalKey, "github.com/acme/web");
+    assert.strictEqual(refined.origin?.canonicalKey, "github.com/fake-user/web");
+    assert.deepStrictEqual(refined.locator, identity.locator);
+  }).pipe(Effect.provide(layer));
+});

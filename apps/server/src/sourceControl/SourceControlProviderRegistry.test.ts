@@ -459,3 +459,45 @@ it.effect("skips GitHub discovery for the identity resolver's empty base URL", (
     assert.deepStrictEqual(hosts, ["githubenterprise.dev.example.com"]);
   }),
 );
+
+it.effect("detects the configured SSH hostname while preserving the transport alias", () =>
+  Effect.gen(function* () {
+    const remoteUrl = "git@github.com-work:example/project.git";
+    const registry = yield* makeRegistry({
+      remotes: [{ name: "origin", url: remoteUrl }],
+      process: {
+        run: (input) =>
+          Effect.succeed(processOutput(input.command === "ssh" ? "hostname github.com\n" : "")),
+      },
+    });
+    const handle = yield* registry.resolveHandle({ cwd: "/repo" });
+    assert.strictEqual(handle.context?.provider.kind, "github");
+    assert.strictEqual(handle.context?.provider.name, "GitHub");
+    assert.strictEqual(handle.context?.provider.baseUrl, "https://github.com");
+    assert.strictEqual(handle.context?.remoteUrl, remoteUrl);
+  }),
+);
+
+it.effect("preserves an explicit web authority when its SSH transport uses another host", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry({
+      remotes: [],
+      process: {
+        run: () => Effect.die("An explicit web authority must not be replaced by SSH discovery"),
+      },
+    });
+    const context = {
+      provider: {
+        kind: SourceControlProviderKind.make("forgejo"),
+        name: "Forgejo",
+        baseUrl: "https://reviews.example.test/gitea",
+      },
+      requestedHost: "reviews.example.test",
+      remoteName: "origin",
+      remoteUrl: "git@work:team/project.git",
+    };
+    const handle = yield* registry.resolveHandle({ cwd: "/repo with spaces", context });
+    assert.deepStrictEqual(handle.context, context);
+    assert.strictEqual(handle.provider.kind, "forgejo");
+  }),
+);

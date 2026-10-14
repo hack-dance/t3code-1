@@ -20,6 +20,7 @@ import {
   type SourceControlProviderDiscoverySpec,
 } from "@t3tools/source-control-core/server/discovery";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
+import { resolveSshRemoteUrl } from "@t3tools/source-control-core/server/sshRemote";
 
 import * as ServerConfig from "../config.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -128,11 +129,12 @@ function selectProviderContext(
   remotes: ReadonlyArray<{
     readonly name: string;
     readonly url: string;
+    readonly resolvedUrl?: string;
   }>,
 ): SourceControlProvider.SourceControlProviderContext | null {
   const candidates: Array<SourceControlProvider.SourceControlProviderContext> = [];
   for (const remote of remotes) {
-    const provider = detectSourceControlProviderFromRemoteUrl(remote.url);
+    const provider = detectSourceControlProviderFromRemoteUrl(remote.resolvedUrl ?? remote.url);
     if (provider) {
       candidates.push({
         provider,
@@ -235,7 +237,12 @@ export const makeWithProviders = Effect.fn("makeSourceControlProviderRegistryWit
               }),
           ),
         );
-        const context = selectProviderContext(remotes.remotes);
+        const resolvedRemotes = yield* Effect.forEach(remotes.remotes, (remote) =>
+          resolveSshRemoteUrl({ remoteUrl: remote.url, cwd, process }).pipe(
+            Effect.map((resolvedUrl) => ({ ...remote, resolvedUrl })),
+          ),
+        );
+        const context = selectProviderContext(resolvedRemotes);
 
         return yield* refineUnknownRemoteProvider({
           specs: discoverySpecs,
@@ -255,15 +262,36 @@ export const makeWithProviders = Effect.fn("makeSourceControlProviderRegistryWit
       timeToLive: (exit) => (Exit.isSuccess(exit) ? PROVIDER_DETECTION_CACHE_TTL : Duration.zero),
     });
 
-    const resolveHandle: SourceControlProviderRegistry["Service"]["resolveHandle"] = (input) =>
-      (input.context === undefined
-        ? Cache.get(providerContextCache, input.cwd)
-        : refineUnknownRemoteProvider({
-            specs: discoverySpecs,
-            process,
-            cwd: input.cwd,
-            context: input.context,
-          })
+    const resolveHandle: SourceControlProviderRegistry["Service"]["resolveHandle"] = (input) => {
+      const requestedContext = input.context;
+      return (
+        requestedContext === undefined
+          ? Cache.get(providerContextCache, input.cwd)
+          : (requestedContext.requestedHost === undefined
+              ? resolveSshRemoteUrl({
+                  remoteUrl: requestedContext.remoteUrl,
+                  cwd: input.cwd,
+                  process,
+                })
+              : Effect.succeed(requestedContext.remoteUrl)
+            ).pipe(
+              Effect.flatMap((url) =>
+                refineUnknownRemoteProvider({
+                  specs: discoverySpecs,
+                  process,
+                  cwd: input.cwd,
+                  context:
+                    url === requestedContext.remoteUrl
+                      ? requestedContext
+                      : {
+                          ...requestedContext,
+                          provider:
+                            detectSourceControlProviderFromRemoteUrl(url) ??
+                            requestedContext.provider,
+                        },
+                }),
+              ),
+            )
       ).pipe(
         Effect.map((context) => {
           const kind = context?.provider.kind ?? SourceControlProviderKind.make("unknown");
@@ -274,6 +302,7 @@ export const makeWithProviders = Effect.fn("makeSourceControlProviderRegistryWit
           } satisfies SourceControlProviderHandle;
         }),
       );
+    };
 
     return SourceControlProviderRegistry.of({
       resolveLink: (input) => {
