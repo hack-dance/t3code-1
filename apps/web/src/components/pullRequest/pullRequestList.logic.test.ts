@@ -10,6 +10,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   pullRequestHostActions,
   largestPullRequestReadCount,
+  pullRequestEntryViewer,
   pullRequestQuickActions,
   filterPullRequestsByInvolvement,
   findScopedProject,
@@ -1745,4 +1746,41 @@ describe("refresh page size", () => {
   it("asks for the whole host where one search reads every repository", () => {
     expect(largestPullRequestReadCount(twoPagesAcrossFourRepositories("github"))).toBe(792);
   });
+});
+
+it("uses each row account for Authored and author:me on one host", () => {
+  const rows = [
+    entry({
+      number: 501,
+      viewer: "work-user",
+      author: { login: "work-user", name: null, avatarUrl: null },
+    }),
+    entry({
+      number: 502,
+      viewer: "personal-user",
+      author: { login: "personal-user", name: null, avatarUrl: null },
+    }),
+    entry({
+      number: 503,
+      viewer: "personal-user",
+      author: { login: "work-user", name: null, avatarUrl: null },
+    }),
+  ];
+  const viewers = { "github.com": "work-user" };
+  expect(
+    filterPullRequestsByInvolvement(rows, viewers, "authored").map((row) => row.number),
+  ).toEqual([501, 502]);
+  expect(
+    rows
+      .filter((row) =>
+        matchesPullRequestFilters(row, { author: "me" }, pullRequestEntryViewer(row, viewers)!),
+      )
+      .map((row) => row.number),
+  ).toEqual([501, 502]);
+  expect(
+    groupPullRequestsByInvolvement(rows, viewers)
+      .find((group) => group.key === "authored")
+      ?.entries.map((row) => row.number),
+  ).toEqual([501, 502]);
+  expect(pullRequestEntryViewer(entry({ number: 504 }), viewers)).toBe("work-user");
 });

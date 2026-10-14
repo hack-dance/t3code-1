@@ -43,6 +43,7 @@ import {
 } from "@t3tools/contracts";
 
 import * as GitHubRest from "./GitHubRest.ts";
+import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubRequestPolicy from "./GitHubRequestPolicy.ts";
 import * as GitHubGraphQlClient from "./gitHubGraphQlClient.ts";
 import { PullRequestBatchesGraphQLGroup } from "./pullRequestBatches.graphql.ts";
@@ -396,7 +397,7 @@ export class GitHubPullRequestApi extends Context.Service<
   GitHubPullRequestApi,
   {
     readonly withVerifiedCredential: <A, E, R>(
-      input: { readonly cwd: string; readonly host: string },
+      input: { readonly cwd: string; readonly host: string; readonly allowReserve?: boolean },
       use: (identity: {
         readonly accountId: string;
         readonly viewer: string;
@@ -882,6 +883,10 @@ export const make = Effect.gen(function* () {
   const sourceControlHost = yield* SourceControlHost.SourceControlHost;
   const fileSystem = yield* FileSystem.FileSystem;
   const revalidateChecks = yield* makeChecksRevalidator;
+  const inRepository = (cwd: string) =>
+    Effect.provideService(GitHubCredentials.RepositoryDirectory, cwd);
+  const rest = (input: GitHubRest.GitHubRestInput & { readonly cwd: string }) =>
+    api.rest(input).pipe(inRepository(input.cwd));
   const routingIdentities = new Map<
     string,
     {
@@ -899,7 +904,11 @@ export const make = Effect.gen(function* () {
     ),
   );
   const captureVerifiedCredential = Effect.fn("GitHubPullRequestApi.captureVerifiedCredential")(
-    function* (input: { readonly cwd: string; readonly host: string }) {
+    function* (input: {
+      readonly cwd: string;
+      readonly host: string;
+      readonly allowReserve?: boolean;
+    }) {
       const unavailable = () => new GitHubViewerLoginUnavailableError({ cwd: input.cwd });
       const host = input.host.toLowerCase();
       const { token, fingerprint: key } = yield* api.credential(host);
@@ -948,8 +957,10 @@ export const make = Effect.gen(function* () {
     use,
   ) =>
     captureVerifiedCredential(input).pipe(
+      inRepository(input.cwd),
       Effect.flatMap(({ host, token, accountId, viewer, credentialFingerprint }) =>
         use({ accountId, viewer, credentialFingerprint }).pipe(
+          Effect.provideService(GitHubCredentials.RepositoryDirectory, input.cwd),
           Effect.provideService(SourceControlRateLimit.CredentialScope, credentialFingerprint),
           Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, {
             host,
@@ -961,6 +972,7 @@ export const make = Effect.gen(function* () {
     );
   const getRoutingIdentity: GitHubPullRequestApi["Service"]["getRoutingIdentity"] = (input) =>
     captureVerifiedCredential(input).pipe(
+      inRepository(input.cwd),
       Effect.map(({ accountId, viewer }) => ({ accountId, viewer })),
     );
 
@@ -994,6 +1006,8 @@ export const make = Effect.gen(function* () {
       Exclude<R, GitHubGraphQlClient.GitHubGraphQlTarget>
     > =>
       effect.pipe(
+        GitHubRequestPolicy.withCredential(policy, input.host),
+        inRepository(input.cwd),
         GitHubGraphQlClient.call({
           host: input.host,
           operation: input.operation,
@@ -1141,13 +1155,16 @@ export const make = Effect.gen(function* () {
     readonly path: string;
     readonly decode: (raw: string) => Result.Result<A, unknown>;
   }): Effect.Effect<A, GitHubPullRequestApiError> =>
-    api
-      .rest({ host: input.host, operation: input.operation, path: input.path })
-      .pipe(
-        Effect.flatMap((response) =>
-          decodeWith(input.cwd, input.operation, input.decode, response.body),
-        ),
-      );
+    rest({
+      cwd: input.cwd,
+      host: input.host,
+      operation: input.operation,
+      path: input.path,
+    }).pipe(
+      Effect.flatMap((response) =>
+        decodeWith(input.cwd, input.operation, input.decode, response.body),
+      ),
+    );
 
   const diffFilesPage = (input: {
     readonly cwd: string;
@@ -1189,21 +1206,28 @@ export const make = Effect.gen(function* () {
             input.commit === undefined ? decodePullRequestFilesJson : decodeCommitFilesJson,
             response.body,
           );
-        }),
-        Effect.map((files) => {
-          // Counted before decoding, so a page whose files all failed to decode still moves on
-          // rather than pointing the reader back at the page it just read.
-          const morePages = files.rawCount >= DIFF_FILES_PAGE_SIZE;
-          return {
-            patch: files.patch,
-            truncated: files.truncated,
-            nextCursor: morePages ? String(input.page + 1) : null,
-            ...(files.omittedFileStats.length === 0
-              ? {}
-              : { omittedFileStats: files.omittedFileStats }),
-          };
-        }),
-      );
+        }
+        return decodeWith(
+          input.cwd,
+          "getPullRequestDiff",
+          input.commit === undefined ? decodePullRequestFilesJson : decodeCommitFilesJson,
+          response.body,
+        );
+      }),
+      Effect.map((files) => {
+        // Counted before decoding, so a page whose files all failed to decode still moves on
+        // rather than pointing the reader back at the page it just read.
+        const morePages = files.rawCount >= DIFF_FILES_PAGE_SIZE;
+        return {
+          patch: files.patch,
+          truncated: files.truncated,
+          nextCursor: morePages ? String(input.page + 1) : null,
+          ...(files.omittedFileStats.length === 0
+            ? {}
+            : { omittedFileStats: files.omittedFileStats }),
+        };
+      }),
+    );
   };
 
   const getPullRequestDiffFileContents: GitHubPullRequestApi["Service"]["getPullRequestDiffFileContents"] =
@@ -1213,7 +1237,8 @@ export const make = Effect.gen(function* () {
           return yield* new GitHubDiffCommitError({ cwd: input.cwd });
         }
         const { owner, name } = parseRepositorySelector(input.repository);
-        const refsResponse = yield* api.rest({
+        const refsResponse = yield* rest({
+          cwd: input.cwd,
           host: input.host,
           operation: "getPullRequestDiffFileContents",
           path:
@@ -1248,31 +1273,30 @@ export const make = Effect.gen(function* () {
         }
 
         const readFile = (revision: string, filePath: string) =>
-          api
-            .rest({
-              host: input.host,
-              operation: "getPullRequestDiffFileContents",
-              accept: "application/vnd.github.raw+json",
-              path: `repos/${owner}/${name}/contents/${filePath
-                .split("/")
-                .map(encodeURIComponent)
-                .join("/")}?ref=${encodeURIComponent(revision)}`,
-              maxResponseBytes: DIFF_FILE_MAX_OUTPUT_BYTES,
-              timeout: DIFF_TIMEOUT,
-            })
-            .pipe(
-              Effect.flatMap((response) =>
-                response.truncated || response.body.includes("\0") || response.invalidUtf8
-                  ? Effect.fail(
-                      new GitHubDiffFileContentsUnavailableError({
-                        cwd: input.cwd,
-                        path: filePath,
-                        reason: response.truncated ? "oversized" : "binary",
-                      }),
-                    )
-                  : Effect.succeed(response.body),
-              ),
-            );
+          rest({
+            cwd: input.cwd,
+            host: input.host,
+            operation: "getPullRequestDiffFileContents",
+            accept: "application/vnd.github.raw+json",
+            path: `repos/${owner}/${name}/contents/${filePath
+              .split("/")
+              .map(encodeURIComponent)
+              .join("/")}?ref=${encodeURIComponent(revision)}`,
+            maxResponseBytes: DIFF_FILE_MAX_OUTPUT_BYTES,
+            timeout: DIFF_TIMEOUT,
+          }).pipe(
+            Effect.flatMap((response) =>
+              response.truncated || response.body.includes("\0") || response.invalidUtf8
+                ? Effect.fail(
+                    new GitHubDiffFileContentsUnavailableError({
+                      cwd: input.cwd,
+                      path: filePath,
+                      reason: response.truncated ? "oversized" : "binary",
+                    }),
+                  )
+                : Effect.succeed(response.body),
+            ),
+          );
 
         const [oldContents, newContents] = yield* Effect.all(
           [
@@ -1562,6 +1586,8 @@ export const make = Effect.gen(function* () {
     Exclude<R, GitHubGraphQlClient.GitHubGraphQlTarget>
   > =>
     effect.pipe(
+      GitHubRequestPolicy.withCredential(policy, input.host),
+      inRepository(input.cwd),
       Effect.provideService(GitHubGraphQlClient.GitHubGraphQlTarget, {
         host: input.host,
         operation: input.operation,
@@ -1815,7 +1841,9 @@ export const make = Effect.gen(function* () {
             },
             { concurrency: "unbounded" },
           ).pipe(
-            Effect.provideService(GitHubGraphQlClient.GitHubGraphQlTarget, {
+            GitHubRequestPolicy.withCredential(policy, input.host),
+      inRepository(input.cwd),
+      Effect.provideService(GitHubGraphQlClient.GitHubGraphQlTarget, {
               host: input.host,
               operation: "listPullRequestStackMemberships",
             }),
@@ -2221,20 +2249,20 @@ export const make = Effect.gen(function* () {
       const { owner, name } = parseRepositorySelector(input.repository);
       const issue = `repos/${owner}/${name}/issues/${input.number}/labels`;
       if (input.applied) {
-        return api
-          .rest({
-            host: input.host,
-            operation: "setLabels",
-            method: "POST",
-            path: issue,
-            body: buildLabelRequest(input.labels),
-          })
-          .pipe(Effect.asVoid);
+        return rest({
+          cwd: input.cwd,
+          host: input.host,
+          operation: "setLabels",
+          method: "POST",
+          path: issue,
+          body: buildLabelRequest(input.labels),
+        }).pipe(Effect.asVoid);
       }
       return Effect.forEach(
         input.labels,
         (label) =>
-          api.rest({
+          rest({
+            cwd: input.cwd,
             host: input.host,
             operation: "setLabels",
             method: "DELETE",
@@ -2404,14 +2432,13 @@ export const make = Effect.gen(function* () {
                       }),
                       Effect.flatMap((currentRuns) =>
                         currentRuns.some((current) => current.id === run.id)
-                          ? api
-                              .rest({
-                                host: input.host,
-                                operation: "approveWorkflowRun",
-                                method: "POST",
-                                path: `repos/${owner}/${name}/actions/runs/${run.id}/approve`,
-                              })
-                              .pipe(Effect.asVoid)
+                          ? rest({
+                              cwd: input.cwd,
+                              host: input.host,
+                              operation: "approveWorkflowRun",
+                              method: "POST",
+                              path: `repos/${owner}/${name}/actions/runs/${run.id}/approve`,
+                            }).pipe(Effect.asVoid)
                           : Effect.void,
                       ),
                     ),
