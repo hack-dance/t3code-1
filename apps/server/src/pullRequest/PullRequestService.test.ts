@@ -8140,3 +8140,146 @@ it.effect("marks review requests with each repository selected account", () =>
     );
   }),
 );
+
+it.effect.each(["gitlab", "forgejo", "bitbucket", "azure-devops"] as const)(
+  "keeps failed %s viewer lookups shared across duplicate checkouts",
+  (kind) =>
+    Effect.gen(function* () {
+      let lookups = 0;
+      const service = yield* makeService({
+        projects: Array.from({ length: 10 }, (_, i) =>
+          project({
+            id: "p" + i,
+            title: "Checkout",
+            workspaceRoot: "/repo" + i,
+            repository: "acme/web",
+            provider: kind,
+          }),
+        ),
+        providers: [
+          fakeProvider(SourceControlProviderKind.make(kind), {
+            getViewer: () => {
+              lookups += 1;
+              return Effect.fail(
+                new PullRequestProviderError({
+                  provider: SourceControlProviderKind.make(kind),
+                  operation: "viewer",
+                  reason: "unauthenticated",
+                  detail: "Test host is signed out.",
+                }),
+              );
+            },
+          }),
+        ],
+      });
+      yield* Effect.flip(service.list({ state: "open" }));
+      assert.strictEqual(lookups, 10);
+    }),
+);
+
+it.effect("looks up a failed non-GitHub host once for all of its repositories", () =>
+  Effect.gen(function* () {
+    let lookups = 0;
+    const kind = SourceControlProviderKind.make("gitlab");
+    const service = yield* makeService({
+      projects: Array.from({ length: 20 }, (_, i) =>
+        project({
+          id: "p" + i,
+          title: "Repository",
+          workspaceRoot: "/repo" + i,
+          repository: "acme/repo" + i,
+          provider: kind,
+        }),
+      ),
+      providers: [
+        fakeProvider(kind, {
+          getViewer: () => {
+            lookups += 1;
+            return Effect.fail(
+              new PullRequestProviderError({
+                provider: kind,
+                operation: "viewer",
+                reason: "unauthenticated",
+                detail: "Test host is signed out.",
+              }),
+            );
+          },
+        }),
+      ],
+    });
+    yield* Effect.flip(service.list({ state: "open" }));
+    assert.strictEqual(lookups, 20);
+  }),
+);
+
+it.effect("refuses continuation under another account while accepting legacy cursors", () =>
+  Effect.gen(function* () {
+    const accounts: Record<string, string> = { "/work": "work-user", "/personal": "personal-user" };
+    let reads = 0;
+    const service = yield* makeService({
+      projects: [
+        project({ id: "w", title: "Work", workspaceRoot: "/work", repository: "acme/web" }),
+        project({ id: "p", title: "Personal", workspaceRoot: "/personal", repository: "acme/web" }),
+      ],
+      providers: [
+        inboxProvider(accounts, {
+          listChangeRequests: () => {
+            reads += 1;
+            return Effect.succeed({
+              items: [changeRequest(7, "2026-07-02T00:00:00Z")],
+              truncated: true,
+              continues: true,
+            });
+          },
+        }),
+      ],
+    });
+    const first = yield* service.list({ state: "open", limit: 1 });
+    assert.isTrue(first.nextCursors["github.com acme/web"]!.endsWith("|work-user"));
+    delete accounts["/work"];
+    const error = yield* Effect.flip(
+      service.list({ state: "open", limit: 1, cursors: first.nextCursors }),
+    );
+    assert.strictEqual(error._tag, "PullRequestOperationError");
+    if (error._tag === "PullRequestOperationError")
+      assert.include(error.detail, "Refresh the inbox");
+    assert.strictEqual(reads, 1);
+    yield* service.list({
+      state: "open",
+      limit: 1,
+      cursors: { "github.com acme/web": "2026-07-02T00:00:00Z|1|7" },
+    });
+    assert.strictEqual(reads, 2);
+  }),
+);
+
+it.effect("reports the first checkout when all duplicate repository accounts fail", () =>
+  Effect.gen(function* () {
+    const service = yield* makeService({
+      projects: [
+        project({ id: "w", title: "Work", workspaceRoot: "/work", repository: "acme/web" }),
+        project({ id: "p", title: "Personal", workspaceRoot: "/personal", repository: "acme/web" }),
+        project({
+          id: "h",
+          title: "Healthy",
+          workspaceRoot: "/healthy",
+          repository: "fake-user/demo",
+        }),
+      ],
+      providers: [
+        inboxProvider(
+          { "/healthy": "healthy-user" },
+          {
+            listChangeRequests: () =>
+              Effect.succeed({ items: [], truncated: false, continues: true }),
+          },
+        ),
+      ],
+    });
+    const result = yield* service.list({ state: "open" });
+    assert.deepStrictEqual(
+      result.errors.map((error) => error.projectId),
+      ["w"],
+    );
+  }),
+);

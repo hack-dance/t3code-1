@@ -91,7 +91,7 @@ export class GitHubRepositoryAccountError extends Schema.TaggedError<GitHubRepos
   { cwd: Schema.String, cause: Schema.Defect() },
 ) {
   override get message(): string {
-    return `Could not read \`git config github.user\` in ${this.cwd}. Fix the Git configuration and retry.`;
+    return `T3 Code cannot read \`git config github.user\` in ${this.cwd}. Run \`git config --get github.user\` in that folder to see the Git error.`;
   }
 }
 

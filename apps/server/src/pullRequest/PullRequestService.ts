@@ -421,6 +421,8 @@ interface RepositoryBatch {
 
 /** What the providers are told, plus the part only the service acts on. */
 interface ListCursor extends ProviderListCursor {
+  /** The account that issued this continuation, when the provider can identify it. */
+  readonly accountId?: string;
   /**
    * The rows already handed over at exactly `updatedBefore`. The next read asks for that instant
    * inclusively, so these are what keeps it from sending them a second time.
@@ -435,7 +437,7 @@ interface ListCursor extends ProviderListCursor {
  * provider drop it into a filter without checking it again.
  */
 const LIST_CURSOR_PATTERN =
-  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2}))\|(\d{1,9})\|(\d{1,9}(?:,\d{1,9})*)?$/;
+  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2}))\|(\d{1,9})\|(\d{1,9}(?:,\d{1,9})*)?(?:\|([a-zA-Z0-9_-]{1,64}))?$/;
 
 function parseListCursor(raw: string): ListCursor | null {
   const match = LIST_CURSOR_PATTERN.exec(raw);
@@ -445,6 +447,7 @@ function parseListCursor(raw: string): ListCursor | null {
     updatedBefore: match[1]!,
     delivered: Number(match[2]),
     seenAt: seenAt === undefined ? [] : seenAt.split(",").map(Number),
+    ...(match[4] === undefined ? {} : { accountId: match[4] }),
   };
 }
 
@@ -805,7 +808,7 @@ export const make = Effect.gen(function* () {
 
   const listWorkspaceProjects = (
     filter: Pick<PullRequestListInput, "projectId" | "projectIds" | "host">,
-    options?: { readonly includeWorktrees: boolean },
+    options?: { readonly includeCheckouts: boolean },
   ): Effect.Effect<WorkspaceProjects, PullRequestError> =>
     (filter.projectId === undefined
       ? projects.listShells(
@@ -884,7 +887,11 @@ export const make = Effect.gen(function* () {
           const repositoryKey =
             api?.repositoryKey?.({ canonicalKey: identity.canonicalKey }) ?? null;
           const key = listCursorKey(host, repositoryKey ?? repository);
-          if (seen.has(key) && (options?.includeWorktrees !== true || api === null)) continue;
+          if (
+            seen.has(key) &&
+            (options?.includeCheckouts !== true || api?.withVerifiedCredential === undefined)
+          )
+            continue;
           seen.add(key);
           if (api === null) {
             const counted = unimplemented.get(host);
@@ -1195,12 +1202,11 @@ export const make = Effect.gen(function* () {
       (project) => project.api.withVerifiedCredential === undefined,
     );
     const hosts = yield* resolveHostViewers(hostProjects, viewerRoots, options);
-    const viewers = new Map<ProjectId, ResolvedViewer>();
-    for (const project of hostProjects) {
-      const result = hosts.find((candidate) => candidate.host === project.host);
-      if (result !== undefined) viewers.set(project.project.id, result);
-    }
-    yield* Effect.forEach(
+    const hostPairs = hostProjects.map(
+      (project) =>
+        [project.project.id, hosts.find((candidate) => candidate.host === project.host)!] as const,
+    );
+    const accountPairs = yield* Effect.forEach(
       projects.filter((project) => project.api.withVerifiedCredential !== undefined),
       (project) =>
         project.api.withVerifiedCredential!(
@@ -1226,11 +1232,11 @@ export const make = Effect.gen(function* () {
               error,
             }),
           ),
-          Effect.tap((result) => Effect.sync(() => viewers.set(project.project.id, result))),
+          Effect.map((result) => [project.project.id, result] as const),
         ),
       { concurrency: REPOSITORY_CONCURRENCY },
     );
-    return viewers;
+    return new Map([...hostPairs, ...accountPairs]);
   });
 
   /** Recheck and pin the selected account around the inbox's own backoff and provider read. */
@@ -1266,6 +1272,10 @@ export const make = Effect.gen(function* () {
     projects: ReadonlyArray<SupportedProject>,
     viewerRoots: WorkspaceProjects["viewerRoots"],
   ) {
+    const hostViewers = yield* resolveViewers(
+      projects.filter((project) => project.api.withVerifiedCredential === undefined),
+      viewerRoots,
+    );
     const groups = new Map<string, Array<SupportedProject>>();
     for (const project of projects) {
       const held = groups.get(project.cursorKey);
@@ -1274,18 +1284,24 @@ export const make = Effect.gen(function* () {
     }
     return yield* Effect.forEach(
       groups.values(),
-      (group) =>
-        Effect.firstSuccessOf(
-          group.map((project) =>
-            resolveViewers([project], viewerRoots).pipe(
-              Effect.flatMap((viewers) => {
-                const viewer = viewers.get(project.project.id)!;
-                const result = { project, viewer };
-                return viewer.error === null ? Effect.succeed(result) : Effect.fail(result);
-              }),
-            ),
-          ),
-        ).pipe(Effect.orElseSucceed((result) => result)),
+      (group) => {
+        const first = group[0]!;
+        if (first.api.withVerifiedCredential === undefined)
+          return Effect.succeed({ project: first, viewer: hostViewers.get(first.project.id)! });
+        return Effect.gen(function* () {
+          let fallback:
+            | { readonly project: SupportedProject; readonly viewer: ResolvedViewer }
+            | undefined;
+          for (const project of group) {
+            const viewers = yield* resolveViewers([project], viewerRoots);
+            const viewer = viewers.get(project.project.id)!;
+            const result = { project, viewer };
+            fallback ??= result;
+            if (viewer.error === null) return result;
+          }
+          return fallback!;
+        });
+      },
       { concurrency: REPOSITORY_CONCURRENCY },
     );
   });
@@ -1387,7 +1403,7 @@ export const make = Effect.gen(function* () {
         supported: checkouts,
         unimplemented,
         viewerRoots,
-      } = yield* listWorkspaceProjects(input, { includeWorktrees: true });
+      } = yield* listWorkspaceProjects(input, { includeCheckouts: true });
       const selectedProjects = yield* selectInboxProjects(checkouts, viewerRoots);
       const projects = selectedProjects.map(({ project }) => project);
       const viewerResults = new Map(
@@ -1444,6 +1460,19 @@ export const make = Effect.gen(function* () {
         continuation === null
           ? projects
           : projects.filter(({ cursorKey }) => continuation.has(cursorKey));
+      for (const project of selected) {
+        const previousAccount = continuation?.get(project.cursorKey)?.accountId;
+        const account = viewerResults.get(project.project.id)?.account;
+        if (
+          previousAccount !== undefined &&
+          account !== undefined &&
+          previousAccount !== account.id
+        )
+          return yield* new PullRequestOperationError({
+            operation: "list",
+            detail: "The repository's GitHub account changed. Refresh the inbox to continue.",
+          });
+      }
       const readable = selected.filter(
         (project) => viewerResults.get(project.project.id)?.viewer != null,
       );
@@ -1455,8 +1484,10 @@ export const make = Effect.gen(function* () {
           projectId: candidate.project.id,
           projectTitle: candidate.project.title,
           message:
-            viewerResults.get(candidate.project.id)?.error?.detail ??
-            `${candidate.repository} could not be read.`,
+            candidate.api.withVerifiedCredential === undefined
+              ? `${candidate.repository} could not be read.`
+              : (viewerResults.get(candidate.project.id)?.error?.detail ??
+                `${candidate.repository} could not be read.`),
         }));
       if (readable.length === 0) {
         // No host this request covers can be read, so it is not a per-project problem. An
@@ -1489,6 +1520,10 @@ export const make = Effect.gen(function* () {
       const limit = input.limit ?? DEFAULT_REPOSITORY_LIST_LIMIT;
       const cursorOf = (project: SupportedProject): ListCursor | undefined =>
         continuation?.get(project.cursorKey);
+      const cursorWithAccount = (project: SupportedProject, cursor: string | null) => {
+        const account = viewerResults.get(project.project.id)?.account;
+        return cursor === null || account === undefined ? cursor : `${cursor}|${account.id}`;
+      };
 
       /**
        * One repository asked on its own. What every host without a search across repositories
@@ -1544,10 +1579,12 @@ export const make = Effect.gen(function* () {
                   .map((item) => toEntry({ project, item, viewer, observedAt })),
                 errors: [],
                 truncated: page.truncated,
-                nextCursor:
+                nextCursor: cursorWithAccount(
+                  project,
                   page.continues && page.truncated
                     ? nextListCursor(cursor, page.items, items, page.cursorAdvance)
                     : null,
+                ),
               };
             }),
             // One unreachable repository must not blank the page. A host-level failure is
@@ -1673,10 +1710,12 @@ export const make = Effect.gen(function* () {
                       .map((item) => toEntry({ project, item, viewer, observedAt })),
                     errors: [],
                     truncated: page.truncated,
-                    nextCursor:
+                    nextCursor: cursorWithAccount(
+                      project,
                       page.truncated && boundary !== null
                         ? listCursorAt(cursorHere, boundary, fetched, items.length)
                         : null,
+                    ),
                   });
                 },
                 { concurrency: REPOSITORY_CONCURRENCY },
@@ -2743,7 +2782,7 @@ export const make = Effect.gen(function* () {
   const listStatsUncached: PullRequestService["Service"]["listStats"] = (input) =>
     Effect.gen(function* () {
       if (input.refs.length === 0) return { stats: [] };
-      const { supported } = yield* listWorkspaceProjects({}, { includeWorktrees: true });
+      const { supported } = yield* listWorkspaceProjects({}, { includeCheckouts: true });
       const byProject = new Map(supported.map((project) => [project.project.id, project]));
       const wanted = new Map<
         string,
@@ -2805,14 +2844,15 @@ export const make = Effect.gen(function* () {
           ).pipe(
             Effect.map((read) =>
               read.flatMap((stat): ReadonlyArray<PullRequestDiffStat> =>
-                (references.get(`${stat.repository.toLowerCase()} ${stat.number}`) ?? [])
-                  .map(({ project }) => ({
+                (references.get(`${stat.repository.toLowerCase()} ${stat.number}`) ?? []).map(
+                  ({ project }) => ({
                     projectId: project.project.id,
                     repository: project.repository,
                     number: stat.number,
                     additions: stat.additions,
                     deletions: stat.deletions,
-                  })),
+                  }),
+                ),
               ),
             ),
             // A row without its counts is a row the page already draws without them, so a host
