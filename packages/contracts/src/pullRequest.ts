@@ -316,6 +316,9 @@ export type PullRequestStackMembership = typeof PullRequestStackMembership.Type;
 export const PullRequestListEntry = Schema.Struct({
   stack: Schema.optional(PullRequestStackMembership),
   provider: SourceControlProviderKind,
+  /**
+   * The host below which `repository` is addressed. Accounts on that host are selected per checkout.
+   */
   host: TrimmedNonEmptyString,
   projectId: ProjectId,
   projectTitle: TrimmedNonEmptyString,
@@ -338,6 +341,8 @@ export const PullRequestListEntry = Schema.Struct({
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   observedAt: Schema.optional(Schema.Finite),
+  /** The checkout's signed-in login. Older servers only provide the host-wide viewer map. */
+  viewer: Schema.optional(TrimmedNonEmptyString),
   viewerReviewRequested: Schema.Boolean,
   labels: Schema.Array(PullRequestLabel),
   reviewDecision: Schema.optional(PullRequestReviewDecision),
@@ -345,6 +350,13 @@ export const PullRequestListEntry = Schema.Struct({
 });
 export type PullRequestListEntry = typeof PullRequestListEntry.Type;
 
+/**
+ * Where each repository a listing already reached carries on from, keyed "<host> <repository>".
+ * A repository uses its first readable checkout's account within a listing.
+ *
+ * Each value is opaque: only the provider that issued one knows what it means, and the page hands
+ * back exactly what it was given rather than composing one.
+ */
 export const PullRequestListCursors = Schema.Record(
   TrimmedNonEmptyString,
   TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
@@ -384,8 +396,8 @@ export type PullRequestListProjectError = typeof PullRequestListProjectError.Typ
 
 export const PullRequestListResult = Schema.Struct({
   /**
-   * A host that could not be read is absent rather than present-and-undefined, because an
-   * open-keyed record cannot carry an optional value through the JSON codec.
+   * A fallback signed-in login per host for older list entries. An entry's own viewer takes
+   * precedence when present. Hosts with no readable account are absent.
    */
   viewers: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString),
   providers: Schema.Array(PullRequestProviderSummary),
