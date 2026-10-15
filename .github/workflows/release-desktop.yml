@@ -134,6 +134,11 @@ jobs:
           git sparse-checkout set --no-cone '/*' '!/.repos/'
           git -c checkout.workers=0 checkout --detach FETCH_HEAD
 
+      - name: Load public HD connection defaults
+        if: github.repository == 'hack-dance/t3code-1'
+        shell: bash
+        run: cp .env.example .env
+
       # The runner's PowerShell 7.6/.NET 10 intermittently crashes during signing:
       # https://github.com/dotnet/runtime/issues/131636
       # Put the .NET 8 release first for both workflow shells and electron-builder.
