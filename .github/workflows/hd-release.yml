@@ -1,0 +1,323 @@
+name: "HD: Sync and release"
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Check upstream, build an isolated candidate, or publish a signed HD release"
+        type: choice
+        default: candidate
+        options: [check, candidate, publish]
+      upstream_channel:
+        description: "Published upstream release to use as the base"
+        type: choice
+        default: nightly
+        options: [nightly, stable]
+      upstream_tag:
+        description: "Optional exact published upstream tag"
+        type: string
+      targets:
+        description: "Pilot: macOS arm64 and Linux x64. Publication requires all."
+        type: choice
+        default: pilot
+        options: [pilot, all]
+  schedule:
+    - cron: "23 */6 * * *"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: hd-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == 'hack-dance/t3code-1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.prepare.outputs.version }}
+      channel: ${{ steps.prepare.outputs.channel }}
+      ref: ${{ steps.prepare.outputs.ref }}
+      mode: ${{ steps.mode.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Select mode
+        id: mode
+        env:
+          REQUESTED_MODE: ${{ inputs.mode }}
+        run: echo "mode=${REQUESTED_MODE:-check}" >> "$GITHUB_OUTPUT"
+      - name: Require release configuration before publication
+        if: steps.mode.outputs.mode == 'publish'
+        env:
+          RELEASE_ENABLED: ${{ vars.HD_RELEASE_ENABLED }}
+          TARGETS: ${{ inputs.targets }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          AZURE_TRUSTED_SIGNING_PUBLISHER_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_PUBLISHER_NAME }}
+        run: |
+          if [[ "$RELEASE_ENABLED" != true || "$TARGETS" != all ]]; then
+            echo 'Publication requires HD_RELEASE_ENABLED=true and targets=all.' >&2
+            exit 1
+          fi
+          for key in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_TEAM_ID MACOS_PROVISIONING_PROFILE AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TRUSTED_SIGNING_ENDPOINT AZURE_TRUSTED_SIGNING_ACCOUNT_NAME AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME AZURE_TRUSTED_SIGNING_PUBLISHER_NAME; do
+            if [[ -z "${!key}" ]]; then
+              echo "Missing signing configuration: $key" >&2
+              exit 1
+            fi
+          done
+      - name: Test candidate preparation
+        run: node --test .github/scripts/hd-release.test.cjs
+      - name: Configure fork push authentication
+        if: steps.mode.outputs.mode != 'check'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh auth setup-git
+      - name: Resolve upstream and replay HD patches
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HD_MODE: ${{ steps.mode.outputs.mode }}
+          HD_UPSTREAM_CHANNEL: ${{ inputs.upstream_channel || 'nightly' }}
+          HD_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+        run: node .github/scripts/hd-release.cjs
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: hd-release-metadata
+          path: |
+            hd-release.json
+            hd-conflict.patch
+          if-no-files-found: warn
+
+  bundle:
+    needs: prepare
+    if: needs.prepare.outputs.mode != 'check'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+      - name: Install native build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+      - name: Check HD release logic and source control fixes
+        run: |
+          vp test run packages/shared/src/cliRelease.test.ts packages/source-control-core/src/server/sshRemote.test.ts packages/source-control-github/src/server/GitHubCredentials.test.ts packages/source-control-github/src/server/GitHubSourceControlProvider.test.ts packages/source-control-github/src/server/GitHubPullRequestApi.test.ts apps/server/src/pullRequest/PullRequestService.test.ts apps/web/src/state/releasePublished.test.ts
+          vp run --filter @t3tools/scripts --filter @t3tools/shared --filter @t3tools/source-control-core --filter @t3tools/source-control-github --filter t3 --filter @t3tools/web typecheck
+      - name: Align versions and use public connection configuration
+        env:
+          HD_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node scripts/update-release-package-versions.ts "$HD_VERSION"
+          cp .env.example .env
+      - name: Build server, bundled web client, and Electron main
+        run: vp run build:desktop
+      - uses: actions/upload-artifact@v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+
+  desktop:
+    needs: [prepare, bundle]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {
+              label: "macOS arm64",
+              runner: macos-15,
+              platform: mac,
+              target: dmg,
+              arch: arm64,
+              rust_target: aarch64-apple-darwin,
+              resource_key: darwin-arm64,
+              cli: true,
+            }
+          - {
+              label: "Linux x64",
+              runner: ubuntu-24.04,
+              platform: linux,
+              target: AppImage,
+              arch: x64,
+              rust_target: x86_64-unknown-linux-gnu,
+              resource_key: linux-x64,
+              cli: true,
+            }
+    uses: ./.github/workflows/release-desktop.yml
+    secrets: inherit
+    with:
+      label: ${{ matrix.label }}
+      runner: ${{ matrix.runner }}
+      platform: ${{ matrix.platform }}
+      target: ${{ matrix.target }}
+      arch: ${{ matrix.arch }}
+      rust_target: ${{ matrix.rust_target }}
+      resource_key: ${{ matrix.resource_key }}
+      cli_archive: ${{ matrix.cli }}
+      version: ${{ needs.prepare.outputs.version }}
+      ref: ${{ needs.prepare.outputs.ref }}
+      release_channel: ${{ needs.prepare.outputs.channel }}
+      update_repository: hack-dance/t3code-1
+      relay_client_tracing: false
+      clerk_publishable_key: ""
+      clerk_jwt_template: ""
+      clerk_cli_oauth_client_id: ""
+      relay_url: ""
+
+  other_desktops:
+    needs: [prepare, bundle]
+    if: inputs.targets == 'all'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {
+              label: "macOS x64",
+              runner: macos-15-intel,
+              platform: mac,
+              target: dmg,
+              arch: x64,
+              rust_target: x86_64-apple-darwin,
+              resource_key: darwin-x64,
+              cli: false,
+            }
+          - {
+              label: "Linux arm64",
+              runner: ubuntu-24.04-arm,
+              platform: linux,
+              target: AppImage,
+              arch: arm64,
+              rust_target: aarch64-unknown-linux-gnu,
+              resource_key: linux-arm64,
+              cli: true,
+            }
+          - {
+              label: "Windows x64",
+              runner: windows-2025,
+              platform: win,
+              target: nsis,
+              arch: x64,
+              rust_target: x86_64-pc-windows-msvc,
+              resource_key: win32-x64,
+              cli: true,
+            }
+          - {
+              label: "Windows arm64",
+              runner: windows-11-arm,
+              platform: win,
+              target: nsis,
+              arch: arm64,
+              rust_target: aarch64-pc-windows-msvc,
+              resource_key: win32-arm64,
+              cli: true,
+            }
+    uses: ./.github/workflows/release-desktop.yml
+    secrets: inherit
+    with:
+      label: ${{ matrix.label }}
+      runner: ${{ matrix.runner }}
+      platform: ${{ matrix.platform }}
+      target: ${{ matrix.target }}
+      arch: ${{ matrix.arch }}
+      rust_target: ${{ matrix.rust_target }}
+      resource_key: ${{ matrix.resource_key }}
+      cli_archive: ${{ matrix.cli }}
+      version: ${{ needs.prepare.outputs.version }}
+      ref: ${{ needs.prepare.outputs.ref }}
+      release_channel: ${{ needs.prepare.outputs.channel }}
+      update_repository: hack-dance/t3code-1
+      relay_client_tracing: false
+      clerk_publishable_key: ""
+      clerk_jwt_template: ""
+      clerk_cli_oauth_client_id: ""
+      relay_url: ""
+
+  publish:
+    needs: [prepare, desktop, other_desktops]
+    if: needs.prepare.outputs.mode == 'publish'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: hd-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          run-install: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: release-assets
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: release-assets
+      - uses: actions/download-artifact@v8
+        with:
+          name: hd-release-metadata
+          path: release-assets
+      - name: Merge updater manifests
+        run: |
+          node scripts/merge-update-manifests.ts --platform mac release-assets/nightly-mac.yml release-assets/nightly-mac-x64.yml
+          node scripts/merge-update-manifests.ts --platform win release-assets/nightly-win-x64.yml release-assets/nightly-win-arm64.yml release-assets/nightly.yml
+          rm release-assets/nightly-mac-x64.yml release-assets/nightly-win-x64.yml release-assets/nightly-win-arm64.yml
+      - name: Write checksums and release notes
+        run: |
+          cd release-assets
+          sha256sum t3-*.tar.gz t3-*.zip > SHA256SUMS
+          node -e 'const fs = require("node:fs"); const m = JSON.parse(fs.readFileSync("hd-release.json")); fs.writeFileSync("../hd-release-notes.md", `HD Nightly ${m.version}\n\nUpstream: ${m.upstreamTag} (${m.upstreamSha})\n\nMaintenance: ${m.sourceSha}\n\nCandidate: ${m.candidateSha}\n\nOverlay commits: ${m.overlayCommits.join(", ")}\n\nHosted web and mobile are distributed separately.\n`);'
+      - name: Publish complete release from a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HD_VERSION: ${{ needs.prepare.outputs.version }}
+          HD_REF: ${{ needs.prepare.outputs.ref }}
+        run: |
+          gh release create "v$HD_VERSION" --repo "$GITHUB_REPOSITORY" --draft --prerelease --target "$HD_REF" --title "HD Nightly $HD_VERSION" --notes-file hd-release-notes.md
+          gh release upload "v$HD_VERSION" --repo "$GITHUB_REPOSITORY" release-assets/*
+          gh release edit "v$HD_VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
