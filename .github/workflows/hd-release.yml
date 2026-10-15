@@ -81,6 +81,10 @@ jobs:
           AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
           AZURE_TRUSTED_SIGNING_PUBLISHER_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_PUBLISHER_NAME }}
         run: |
+          if [[ "$GITHUB_REF" != refs/heads/hd/nightly ]]; then
+            echo 'Publish from the HD maintenance branch.' >&2
+            exit 1
+          fi
           if [[ "$RELEASE_ENABLED" != true || "$TARGETS" != all ]]; then
             echo 'Publication requires HD_RELEASE_ENABLED=true and targets=all.' >&2
             exit 1
@@ -318,6 +322,8 @@ jobs:
           HD_VERSION: ${{ needs.prepare.outputs.version }}
           HD_REF: ${{ needs.prepare.outputs.ref }}
         run: |
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/hd/nightly" --jq .object.sha > current-maintenance-sha.txt
+          node -e 'const fs = require("node:fs"); const m = JSON.parse(fs.readFileSync("release-assets/hd-release.json")); if (fs.readFileSync("current-maintenance-sha.txt", "utf8").trim() !== m.sourceSha) throw new Error("HD maintenance changed during this build; prepare a new candidate.");'
           gh release create "v$HD_VERSION" --repo "$GITHUB_REPOSITORY" --draft --prerelease --target "$HD_REF" --title "HD Nightly $HD_VERSION" --notes-file hd-release-notes.md
           gh release upload "v$HD_VERSION" --repo "$GITHUB_REPOSITORY" release-assets/*
           gh release edit "v$HD_VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
