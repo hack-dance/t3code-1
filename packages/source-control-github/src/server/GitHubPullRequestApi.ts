@@ -2681,6 +2681,7 @@ export const make = Effect.gen(function* () {
             });
           }
           yield* graphql({
+            cwd: input.cwd,
             host: input.host,
             operation: "deletePullRequestBranch",
             query: DELETE_BRANCH_GRAPHQL_MUTATION,
