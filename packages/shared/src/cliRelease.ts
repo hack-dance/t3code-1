@@ -1,4 +1,4 @@
-const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
+const CLI_RELEASE_REPOSITORY = "hack-dance/t3code-1";
 export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
 export const CLI_RELEASE_BASE_URL_ENV = "T3CODE_RELEASE_BASE_URL";
 
@@ -83,6 +83,10 @@ export function cliReleaseChannelOf(version: string): CliReleaseChannel {
  */
 export function cliReleaseIndexPageUrl(page: number): string {
   return `https://api.github.com/repos/${CLI_RELEASE_REPOSITORY}/releases?per_page=100&page=${page}`;
+}
+
+export function cliReleaseByTagUrl(version: string): string {
+  return `https://api.github.com/repos/${CLI_RELEASE_REPOSITORY}/releases/tags/v${encodeURIComponent(version)}`;
 }
 
 /**
