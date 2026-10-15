@@ -928,8 +928,8 @@ export const make = Effect.gen(function* () {
               if (cached !== undefined && now - cached.at < 10 * 60_000)
                 return { ...credential, ...cached.value };
               // Pin this read so an auth switch cannot poison its cache entry.
-              const response = yield* api
-                .rest({ host, operation: "getRoutingIdentity", path: "user", allowReserve: true })
+              const response = yield* rest({
+          cwd: input.cwd, host, operation: "getRoutingIdentity", path: "user", allowReserve: input.allowReserve === true })
                 .pipe(
                   Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, credential),
                   Effect.provideService(SourceControlRateLimit.CredentialScope, key),
@@ -1100,7 +1100,7 @@ export const make = Effect.gen(function* () {
       return Effect.succeed(held);
     }
     return client.PullRequestNodeId({ owner, name, number: input.number }).pipe(
-      graphql({ ...input, allowReserve: true }),
+      graphql({ ...input, allowReserve: input.allowReserve === true }),
       Effect.map(toPullRequestNodeId),
       Effect.flatMap(found(input)),
       Effect.tap((nodeId) =>
@@ -1131,7 +1131,7 @@ export const make = Effect.gen(function* () {
     const { owner, name } = parseRepositorySelector(input.repository);
     return client
       .PullRequestSubject({ owner, name, number: input.number, subjectId: input.subjectId })
-      .pipe(graphql({ ...input, allowReserve: true }), Effect.map(isSubjectOfPullRequest));
+      .pipe(graphql({ ...input, allowReserve: input.allowReserve === true }), Effect.map(isSubjectOfPullRequest));
   };
 
   /** Decodes an answer, reporting a failure against the read that made it. */
@@ -1176,8 +1176,8 @@ export const make = Effect.gen(function* () {
   }): Effect.Effect<GitHubPullRequestDiffSlice, GitHubPullRequestApiError> => {
     const { owner, name } = parseRepositorySelector(input.repository);
     const paging = `per_page=${DIFF_FILES_PAGE_SIZE}&page=${input.page}`;
-    return api
-      .rest({
+    return rest({
+        cwd: input.cwd,
         host: input.host,
         operation: "getPullRequestDiff",
         path:
@@ -1206,28 +1206,21 @@ export const make = Effect.gen(function* () {
             input.commit === undefined ? decodePullRequestFilesJson : decodeCommitFilesJson,
             response.body,
           );
-        }
-        return decodeWith(
-          input.cwd,
-          "getPullRequestDiff",
-          input.commit === undefined ? decodePullRequestFilesJson : decodeCommitFilesJson,
-          response.body,
-        );
-      }),
-      Effect.map((files) => {
-        // Counted before decoding, so a page whose files all failed to decode still moves on
-        // rather than pointing the reader back at the page it just read.
-        const morePages = files.rawCount >= DIFF_FILES_PAGE_SIZE;
-        return {
-          patch: files.patch,
-          truncated: files.truncated,
-          nextCursor: morePages ? String(input.page + 1) : null,
-          ...(files.omittedFileStats.length === 0
-            ? {}
-            : { omittedFileStats: files.omittedFileStats }),
-        };
-      }),
-    );
+        }),
+        Effect.map((files) => {
+          // Counted before decoding, so a page whose files all failed to decode still moves on
+          // rather than pointing the reader back at the page it just read.
+          const morePages = files.rawCount >= DIFF_FILES_PAGE_SIZE;
+          return {
+            patch: files.patch,
+            truncated: files.truncated,
+            nextCursor: morePages ? String(input.page + 1) : null,
+            ...(files.omittedFileStats.length === 0
+              ? {}
+              : { omittedFileStats: files.omittedFileStats }),
+          };
+        }),
+      );
   };
 
   const getPullRequestDiffFileContents: GitHubPullRequestApi["Service"]["getPullRequestDiffFileContents"] =
@@ -2034,8 +2027,8 @@ export const make = Effect.gen(function* () {
         return filesPage(1);
       }
       const { owner, name } = parseRepositorySelector(input.repository);
-      return api
-        .rest({
+      return rest({
+          cwd: input.cwd,
           host: input.host,
           operation: "getPullRequestDiff",
           path: `repos/${owner}/${name}/pulls/${input.number}`,
@@ -2214,7 +2207,7 @@ export const make = Effect.gen(function* () {
       return client
         .ReviewerCandidates({ owner, name, number: input.number })
         .pipe(
-          graphql({ ...input, operation, allowReserve: true }),
+          graphql({ ...input, operation, allowReserve: input.allowReserve === true }),
           Effect.map(toReviewerCandidates),
           Effect.flatMap(found({ ...input, operation })),
         );
@@ -2222,8 +2215,8 @@ export const make = Effect.gen(function* () {
 
     setReviewerRequest: (input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
-      return api
-        .rest({
+      return rest({
+          cwd: input.cwd,
           host: input.host,
           operation: "setReviewerRequest",
           method: input.requested ? "POST" : "DELETE",
@@ -2239,7 +2232,7 @@ export const make = Effect.gen(function* () {
       return client
         .LabelCandidates({ owner, name, number: input.number })
         .pipe(
-          graphql({ ...input, operation, allowReserve: true }),
+          graphql({ ...input, operation, allowReserve: input.allowReserve === true }),
           Effect.map(toLabelCandidates),
           Effect.flatMap(found({ ...input, operation })),
         );
@@ -2286,7 +2279,7 @@ export const make = Effect.gen(function* () {
           const branch = yield* client
             .PullRequestBranchToDelete({ owner, name, number: input.number })
             .pipe(
-              graphql({ ...target, allowReserve: true }),
+              graphql({ ...target, allowReserve: input.allowReserve === true }),
               Effect.map((result) => result.repository?.pullRequest ?? null),
               Effect.flatMap(found(target)),
             );
@@ -2312,7 +2305,7 @@ export const make = Effect.gen(function* () {
           const ref = `refs/heads/${branch.headRefName}`;
           const source = yield* client
             .PullRequestSourceBranch({ repositoryId, ref })
-            .pipe(graphql({ ...target, allowReserve: true }));
+            .pipe(graphql({ ...target, allowReserve: input.allowReserve === true }));
           const repository = source.node?.__typename === "Repository" ? source.node : null;
           if (repository === null) {
             return yield* new GitHubBranchDeletionRefusedError({
@@ -2355,6 +2348,7 @@ export const make = Effect.gen(function* () {
       }
       if (input.stackNumber !== undefined)
         return runGitHubStackAction({ ...input, stackNumber: input.stackNumber }).pipe(
+          inRepository(input.cwd),
           Effect.provideService(GitHubRest.GitHubRest, api),
           Effect.provideService(GitHubRequestPolicy.GitHubRequestPolicy, policy),
           Effect.provideService(HttpClient.HttpClient, httpClient),
@@ -2471,7 +2465,7 @@ export const make = Effect.gen(function* () {
             headRef: `refs/pull/${input.number}/head`,
           })
           .pipe(
-            graphql({ ...target, allowReserve: true }),
+            graphql({ ...target, allowReserve: input.allowReserve === true }),
             Effect.map((result) => result.repository?.pullRequest ?? null),
             Effect.flatMap(found(target)),
           );
@@ -2497,7 +2491,7 @@ export const make = Effect.gen(function* () {
               method: input.mergeMethod === "squash" ? "SQUASH" : "MERGE",
             })
             .pipe(
-              graphql({ ...target, allowReserve: true }),
+              graphql({ ...target, allowReserve: input.allowReserve === true }),
               Effect.map((result) => result.repository?.pullRequest ?? null),
               Effect.flatMap(found(target)),
             );
@@ -2542,8 +2536,8 @@ export const make = Effect.gen(function* () {
 
     submitReview: (input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
-      return api
-        .rest({
+      return rest({
+          cwd: input.cwd,
           host: input.host,
           operation: "submitReview",
           method: "POST",
