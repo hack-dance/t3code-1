@@ -2529,6 +2529,62 @@ layer("GitHubPullRequestApi.layer", (it) => {
     }),
   );
 
+  it.effect("deletes a source branch using the same repository account as its safety checks", () =>
+    Effect.gen(function* () {
+      const authorizations: Array<string | undefined> = [];
+      const answers = [branchToDelete(), sourceBranch(), { data: { updateRefs: {} } }];
+      const credentials = Layer.succeed(
+        GitHubCredentials.GitHubCredentials,
+        GitHubCredentials.GitHubCredentials.of({
+          get: (host) =>
+            Effect.gen(function* () {
+              const cwd = yield* GitHubCredentials.RepositoryDirectory;
+              const account = cwd === "/repo" ? "repository-account" : "default-account";
+              return {
+                host,
+                token: Redacted.make(account),
+                source: "gh" as const,
+                fingerprint: account,
+              };
+            }),
+          invalidate: () => Effect.void,
+        }),
+      );
+      const http = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.sync(() => {
+            authorizations.push(request.headers["authorization"]);
+            return HttpClientResponse.fromWeb(request, new Response(encodeJson(answers.shift())));
+          }),
+        ),
+      );
+      const cli = yield* GitHubPullRequestApi.make.pipe(
+        Effect.provide(
+          GitHubApi.layer.pipe(
+            Layer.provide(Layer.mergeAll(credentials, http)),
+            Layer.provide(GitHubQuota.layer),
+            Layer.provide(SourceControlRateLimit.layer),
+            Layer.merge(TestSourceControlHost.layer()),
+            Layer.provideMerge(NodeServices.layer),
+          ),
+        ),
+      );
+      yield* cli.runPullRequestAction({
+        cwd: "/repo",
+        repository: "acme/web",
+        host: "github.com",
+        number: 7,
+        action: "delete-branch",
+      });
+      expect(authorizations).toEqual([
+        "Bearer repository-account",
+        "Bearer repository-account",
+        "Bearer repository-account",
+      ]);
+    }),
+  );
+
   it.effect.each([
     { description: "an open PR", head: { state: "OPEN" }, source: {} },
     { description: "a missing source repository", head: { headRepository: null }, source: {} },
