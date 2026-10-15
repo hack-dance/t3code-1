@@ -7,6 +7,7 @@ import {
   cliReleaseDownloadBaseUrl,
   cliReleaseChannelOf,
   cliReleaseIndexPageUrl,
+  cliReleaseByTagUrl,
   newestCliReleaseVersion,
   parseChecksums,
 } from "./cliRelease.ts";
@@ -32,7 +33,7 @@ describe("cliRelease", () => {
 
   it("resolves download URLs under the tagged release, honoring a mirror", () => {
     expect(cliReleaseDownloadBaseUrl("1.2.3")).toBe(
-      "https://github.com/pingdotgg/t3code/releases/download/v1.2.3",
+      "https://github.com/hack-dance/t3code-1/releases/download/v1.2.3",
     );
     expect(cliReleaseDownloadBaseUrl("1.2.3", "https://mirror.example/t3/")).toBe(
       "https://mirror.example/t3/v1.2.3",
@@ -85,8 +86,11 @@ describe("cliRelease", () => {
 
   it("pages through the release index at the largest page GitHub allows", () => {
     expect(cliReleaseIndexPageUrl(1)).toBe(
-      "https://api.github.com/repos/pingdotgg/t3code/releases?per_page=100&page=1",
+      "https://api.github.com/repos/hack-dance/t3code-1/releases?per_page=100&page=1",
     );
     expect(cliReleaseIndexPageUrl(3)).toContain("page=3");
+    expect(cliReleaseByTagUrl("1.2.3-nightly.20261015.42")).toBe(
+      "https://api.github.com/repos/hack-dance/t3code-1/releases/tags/v1.2.3-nightly.20261015.42",
+    );
   });
 });
