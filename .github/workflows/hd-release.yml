@@ -349,6 +349,8 @@ jobs:
         with:
           name: hd-release-metadata
           path: release-assets
+      - name: Exclude builder diagnostics from public installers
+        run: rm -f release-assets/builder-debug.yml
       - name: Merge updater manifests
         run: |
           if [[ -f release-assets/nightly-mac-x64.yml ]]; then
