@@ -517,8 +517,10 @@ it.effect("asks once for every checkout of a server no integration claims", () =
       remotes: [],
       process: {
         run: ({ command, args, cwd }) => {
-          asked.push([command, ...args].join(" "));
-          return Deferred.await(release).pipe(Effect.andThen(Effect.fail(notFound(command, cwd))));
+          if (command !== "ssh") asked.push([command, ...args].join(" "));
+          return command === "ssh"
+            ? Effect.fail(notFound(command, cwd))
+            : Deferred.await(release).pipe(Effect.andThen(Effect.fail(notFound(command, cwd))));
         },
       },
       githubApi: {
@@ -574,6 +576,7 @@ it.effect("asks again after a check that could not answer", () =>
       remotes: [],
       process: {
         run: ({ command, cwd }) => {
+          if (command === "ssh") return Effect.fail(notFound(command, cwd));
           asks += 1;
           return Effect.fail(
             new VcsProcessTimeoutError({ operation: "test", command, cwd, timeoutMs: 1 }),

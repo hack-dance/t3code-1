@@ -929,11 +929,15 @@ export const make = Effect.gen(function* () {
                 return { ...credential, ...cached.value };
               // Pin this read so an auth switch cannot poison its cache entry.
               const response = yield* rest({
-          cwd: input.cwd, host, operation: "getRoutingIdentity", path: "user", allowReserve: input.allowReserve === true })
-                .pipe(
-                  Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, credential),
-                  Effect.provideService(SourceControlRateLimit.CredentialScope, key),
-                );
+                cwd: input.cwd,
+                host,
+                operation: "getRoutingIdentity",
+                path: "user",
+                allowReserve: input.allowReserve ?? true,
+              }).pipe(
+                Effect.provideService(GitHubRequestPolicy.PinnedGitHubCredential, credential),
+                Effect.provideService(SourceControlRateLimit.CredentialScope, key),
+              );
               const identity = yield* decodeRoutingIdentity(response.body).pipe(
                 Effect.mapError(unavailable),
               );
@@ -1000,8 +1004,7 @@ export const make = Effect.gen(function* () {
     ): Effect.Effect<
       A,
       | Exclude<E, GraphQLClientError.GraphQLClientError>
-      | GitHubRequestPolicy.GitHubApiNotFoundError
-      | GitHubRequestPolicy.GitHubApiResponseError
+      | GitHubRequestPolicy.GitHubApiError
       | GitHubPullRequestReadError,
       Exclude<R, GitHubGraphQlClient.GitHubGraphQlTarget>
     > =>
@@ -1100,7 +1103,7 @@ export const make = Effect.gen(function* () {
       return Effect.succeed(held);
     }
     return client.PullRequestNodeId({ owner, name, number: input.number }).pipe(
-      graphql({ ...input, allowReserve: input.allowReserve === true }),
+      graphql({ ...input, allowReserve: true }),
       Effect.map(toPullRequestNodeId),
       Effect.flatMap(found(input)),
       Effect.tap((nodeId) =>
@@ -1131,7 +1134,7 @@ export const make = Effect.gen(function* () {
     const { owner, name } = parseRepositorySelector(input.repository);
     return client
       .PullRequestSubject({ owner, name, number: input.number, subjectId: input.subjectId })
-      .pipe(graphql({ ...input, allowReserve: input.allowReserve === true }), Effect.map(isSubjectOfPullRequest));
+      .pipe(graphql({ ...input, allowReserve: true }), Effect.map(isSubjectOfPullRequest));
   };
 
   /** Decodes an answer, reporting a failure against the read that made it. */
@@ -1177,50 +1180,49 @@ export const make = Effect.gen(function* () {
     const { owner, name } = parseRepositorySelector(input.repository);
     const paging = `per_page=${DIFF_FILES_PAGE_SIZE}&page=${input.page}`;
     return rest({
-        cwd: input.cwd,
-        host: input.host,
-        operation: "getPullRequestDiff",
-        path:
-          input.commit === undefined
-            ? `repos/${owner}/${name}/pulls/${input.number}/files?${paging}`
-            : `repos/${owner}/${name}/commits/${input.commit}?${paging}`,
-        maxResponseBytes: DIFF_MAX_OUTPUT_BYTES,
-        timeout: DIFF_TIMEOUT,
-      })
-      .pipe(
-        Effect.flatMap((response) => {
-          // Checked before decoding: a byte-truncated response is a JSON prefix, which would
-          // fail to parse.
-          if (response.truncated) {
-            return Effect.fail(
-              readError(
-                input.cwd,
-                "getPullRequestDiff",
-                new Error(`Page ${input.page} of the changed files was too large to read.`),
-              ),
-            );
-          }
-          return decodeWith(
-            input.cwd,
-            "getPullRequestDiff",
-            input.commit === undefined ? decodePullRequestFilesJson : decodeCommitFilesJson,
-            response.body,
+      cwd: input.cwd,
+      host: input.host,
+      operation: "getPullRequestDiff",
+      path:
+        input.commit === undefined
+          ? `repos/${owner}/${name}/pulls/${input.number}/files?${paging}`
+          : `repos/${owner}/${name}/commits/${input.commit}?${paging}`,
+      maxResponseBytes: DIFF_MAX_OUTPUT_BYTES,
+      timeout: DIFF_TIMEOUT,
+    }).pipe(
+      Effect.flatMap((response) => {
+        // Checked before decoding: a byte-truncated response is a JSON prefix, which would
+        // fail to parse.
+        if (response.truncated) {
+          return Effect.fail(
+            readError(
+              input.cwd,
+              "getPullRequestDiff",
+              new Error(`Page ${input.page} of the changed files was too large to read.`),
+            ),
           );
-        }),
-        Effect.map((files) => {
-          // Counted before decoding, so a page whose files all failed to decode still moves on
-          // rather than pointing the reader back at the page it just read.
-          const morePages = files.rawCount >= DIFF_FILES_PAGE_SIZE;
-          return {
-            patch: files.patch,
-            truncated: files.truncated,
-            nextCursor: morePages ? String(input.page + 1) : null,
-            ...(files.omittedFileStats.length === 0
-              ? {}
-              : { omittedFileStats: files.omittedFileStats }),
-          };
-        }),
-      );
+        }
+        return decodeWith(
+          input.cwd,
+          "getPullRequestDiff",
+          input.commit === undefined ? decodePullRequestFilesJson : decodeCommitFilesJson,
+          response.body,
+        );
+      }),
+      Effect.map((files) => {
+        // Counted before decoding, so a page whose files all failed to decode still moves on
+        // rather than pointing the reader back at the page it just read.
+        const morePages = files.rawCount >= DIFF_FILES_PAGE_SIZE;
+        return {
+          patch: files.patch,
+          truncated: files.truncated,
+          nextCursor: morePages ? String(input.page + 1) : null,
+          ...(files.omittedFileStats.length === 0
+            ? {}
+            : { omittedFileStats: files.omittedFileStats }),
+        };
+      }),
+    );
   };
 
   const getPullRequestDiffFileContents: GitHubPullRequestApi["Service"]["getPullRequestDiffFileContents"] =
@@ -1575,7 +1577,7 @@ export const make = Effect.gen(function* () {
     A,
     | Exclude<E, GraphQLClientError.GraphQLClientError>
     | GitHubPullRequestReadError
-    | GitHubRequestPolicy.GitHubApiNotFoundError,
+    | GitHubRequestPolicy.GitHubApiError,
     Exclude<R, GitHubGraphQlClient.GitHubGraphQlTarget>
   > =>
     effect.pipe(
@@ -1835,8 +1837,8 @@ export const make = Effect.gen(function* () {
             { concurrency: "unbounded" },
           ).pipe(
             GitHubRequestPolicy.withCredential(policy, input.host),
-      inRepository(input.cwd),
-      Effect.provideService(GitHubGraphQlClient.GitHubGraphQlTarget, {
+            inRepository(input.cwd),
+            Effect.provideService(GitHubGraphQlClient.GitHubGraphQlTarget, {
               host: input.host,
               operation: "listPullRequestStackMemberships",
             }),
@@ -2028,26 +2030,25 @@ export const make = Effect.gen(function* () {
       }
       const { owner, name } = parseRepositorySelector(input.repository);
       return rest({
-          cwd: input.cwd,
-          host: input.host,
-          operation: "getPullRequestDiff",
-          path: `repos/${owner}/${name}/pulls/${input.number}`,
-          accept: "application/vnd.github.diff",
-          maxResponseBytes: DIFF_MAX_OUTPUT_BYTES,
-          timeout: DIFF_TIMEOUT,
-        })
-        .pipe(
-          Effect.flatMap((response) =>
-            response.truncated
-              ? filesPage(1)
-              : Effect.succeed({ patch: response.body, truncated: false, nextCursor: null }),
-          ),
-          // GitHub answers 406 rather than a diff past 300 changed files, so the patch is read
-          // from the files API instead, a page per call.
-          Effect.catchTags({
-            GitHubApiResponseError: (error) => filesPage(1).pipe(Effect.mapError(() => error)),
-          }),
-        );
+        cwd: input.cwd,
+        host: input.host,
+        operation: "getPullRequestDiff",
+        path: `repos/${owner}/${name}/pulls/${input.number}`,
+        accept: "application/vnd.github.diff",
+        maxResponseBytes: DIFF_MAX_OUTPUT_BYTES,
+        timeout: DIFF_TIMEOUT,
+      }).pipe(
+        Effect.flatMap((response) =>
+          response.truncated
+            ? filesPage(1)
+            : Effect.succeed({ patch: response.body, truncated: false, nextCursor: null }),
+        ),
+        // GitHub answers 406 rather than a diff past 300 changed files, so the patch is read
+        // from the files API instead, a page per call.
+        Effect.catchTags({
+          GitHubApiResponseError: (error) => filesPage(1).pipe(Effect.mapError(() => error)),
+        }),
+      );
     },
 
     getPullRequestDiffFileContents,
@@ -2207,7 +2208,7 @@ export const make = Effect.gen(function* () {
       return client
         .ReviewerCandidates({ owner, name, number: input.number })
         .pipe(
-          graphql({ ...input, operation, allowReserve: input.allowReserve === true }),
+          graphql({ ...input, operation, allowReserve: true }),
           Effect.map(toReviewerCandidates),
           Effect.flatMap(found({ ...input, operation })),
         );
@@ -2216,14 +2217,13 @@ export const make = Effect.gen(function* () {
     setReviewerRequest: (input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
       return rest({
-          cwd: input.cwd,
-          host: input.host,
-          operation: "setReviewerRequest",
-          method: input.requested ? "POST" : "DELETE",
-          path: `repos/${owner}/${name}/pulls/${input.number}/requested_reviewers`,
-          body: buildReviewerRequest(input.reviewers),
-        })
-        .pipe(Effect.asVoid);
+        cwd: input.cwd,
+        host: input.host,
+        operation: "setReviewerRequest",
+        method: input.requested ? "POST" : "DELETE",
+        path: `repos/${owner}/${name}/pulls/${input.number}/requested_reviewers`,
+        body: buildReviewerRequest(input.reviewers),
+      }).pipe(Effect.asVoid);
     },
 
     listLabelCandidates: (input) => {
@@ -2232,7 +2232,7 @@ export const make = Effect.gen(function* () {
       return client
         .LabelCandidates({ owner, name, number: input.number })
         .pipe(
-          graphql({ ...input, operation, allowReserve: input.allowReserve === true }),
+          graphql({ ...input, operation, allowReserve: true }),
           Effect.map(toLabelCandidates),
           Effect.flatMap(found({ ...input, operation })),
         );
@@ -2279,7 +2279,7 @@ export const make = Effect.gen(function* () {
           const branch = yield* client
             .PullRequestBranchToDelete({ owner, name, number: input.number })
             .pipe(
-              graphql({ ...target, allowReserve: input.allowReserve === true }),
+              graphql({ ...target, allowReserve: true }),
               Effect.map((result) => result.repository?.pullRequest ?? null),
               Effect.flatMap(found(target)),
             );
@@ -2305,7 +2305,7 @@ export const make = Effect.gen(function* () {
           const ref = `refs/heads/${branch.headRefName}`;
           const source = yield* client
             .PullRequestSourceBranch({ repositoryId, ref })
-            .pipe(graphql({ ...target, allowReserve: input.allowReserve === true }));
+            .pipe(graphql({ ...target, allowReserve: true }));
           const repository = source.node?.__typename === "Repository" ? source.node : null;
           if (repository === null) {
             return yield* new GitHubBranchDeletionRefusedError({
@@ -2465,7 +2465,7 @@ export const make = Effect.gen(function* () {
             headRef: `refs/pull/${input.number}/head`,
           })
           .pipe(
-            graphql({ ...target, allowReserve: input.allowReserve === true }),
+            graphql({ ...target, allowReserve: true }),
             Effect.map((result) => result.repository?.pullRequest ?? null),
             Effect.flatMap(found(target)),
           );
@@ -2491,7 +2491,7 @@ export const make = Effect.gen(function* () {
               method: input.mergeMethod === "squash" ? "SQUASH" : "MERGE",
             })
             .pipe(
-              graphql({ ...target, allowReserve: input.allowReserve === true }),
+              graphql({ ...target, allowReserve: true }),
               Effect.map((result) => result.repository?.pullRequest ?? null),
               Effect.flatMap(found(target)),
             );
@@ -2537,18 +2537,17 @@ export const make = Effect.gen(function* () {
     submitReview: (input) => {
       const { owner, name } = parseRepositorySelector(input.repository);
       return rest({
-          cwd: input.cwd,
-          host: input.host,
-          operation: "submitReview",
-          method: "POST",
-          path: `repos/${owner}/${name}/pulls/${input.number}/reviews`,
-          body: buildReviewSubmission({
-            verdict: input.verdict,
-            body: input.body,
-            comments: input.comments,
-          }),
-        })
-        .pipe(Effect.asVoid);
+        cwd: input.cwd,
+        host: input.host,
+        operation: "submitReview",
+        method: "POST",
+        path: `repos/${owner}/${name}/pulls/${input.number}/reviews`,
+        body: buildReviewSubmission({
+          verdict: input.verdict,
+          body: input.body,
+          comments: input.comments,
+        }),
+      }).pipe(Effect.asVoid);
     },
 
     replyToReviewThread: (input) =>
