@@ -17,7 +17,7 @@ on:
         description: "Optional exact published upstream tag"
         type: string
       targets:
-        description: "Pilot: macOS arm64 and Linux x64. Publication requires all."
+        description: "Pilot: macOS arm64 and Linux x64. All adds Intel Mac, Linux arm64, and Windows."
         type: choice
         default: pilot
         options: [pilot, all]
@@ -89,11 +89,15 @@ jobs:
             echo 'Publish from the HD maintenance branch.' >&2
             exit 1
           fi
-          if [[ "$RELEASE_ENABLED" != true || "$TARGETS" != all ]]; then
-            echo 'Publication requires HD_RELEASE_ENABLED=true and targets=all.' >&2
+          if [[ "$RELEASE_ENABLED" != true ]]; then
+            echo 'Publication requires HD_RELEASE_ENABLED=true.' >&2
             exit 1
           fi
-          for key in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_TEAM_ID MACOS_PROVISIONING_PROFILE AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TRUSTED_SIGNING_ENDPOINT AZURE_TRUSTED_SIGNING_ACCOUNT_NAME AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME AZURE_TRUSTED_SIGNING_PUBLISHER_NAME; do
+          keys=(CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_TEAM_ID MACOS_PROVISIONING_PROFILE)
+          if [[ "$TARGETS" == all ]]; then
+            keys+=(AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TRUSTED_SIGNING_ENDPOINT AZURE_TRUSTED_SIGNING_ACCOUNT_NAME AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME AZURE_TRUSTED_SIGNING_PUBLISHER_NAME)
+          fi
+          for key in "${keys[@]}"; do
             if [[ -z "${!key}" ]]; then
               echo "Missing signing configuration: $key" >&2
               exit 1
@@ -113,6 +117,7 @@ jobs:
           HD_MODE: ${{ steps.mode.outputs.mode }}
           HD_UPSTREAM_CHANNEL: ${{ inputs.upstream_channel || 'nightly' }}
           HD_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          HD_TARGETS: ${{ inputs.targets || 'pilot' }}
         run: node .github/scripts/hd-release.cjs
       - uses: actions/upload-artifact@v7
         if: always()
@@ -193,7 +198,20 @@ jobs:
               cli: true,
             }
     uses: ./.github/workflows/release-desktop.yml
-    secrets: inherit
+    secrets:
+      CSC_LINK: ${{ needs.prepare.outputs.mode == 'publish' && secrets.CSC_LINK || '' }}
+      CSC_KEY_PASSWORD: ${{ needs.prepare.outputs.mode == 'publish' && secrets.CSC_KEY_PASSWORD || '' }}
+      APPLE_API_KEY: ${{ needs.prepare.outputs.mode == 'publish' && secrets.APPLE_API_KEY || '' }}
+      APPLE_API_KEY_ID: ${{ needs.prepare.outputs.mode == 'publish' && secrets.APPLE_API_KEY_ID || '' }}
+      APPLE_API_ISSUER: ${{ needs.prepare.outputs.mode == 'publish' && secrets.APPLE_API_ISSUER || '' }}
+      MACOS_PROVISIONING_PROFILE: ${{ needs.prepare.outputs.mode == 'publish' && secrets.MACOS_PROVISIONING_PROFILE || '' }}
+      AZURE_TENANT_ID: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_TENANT_ID || '' }}
+      AZURE_CLIENT_ID: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_CLIENT_ID || '' }}
+      AZURE_CLIENT_SECRET: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_CLIENT_SECRET || '' }}
+      AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_TRUSTED_SIGNING_ENDPOINT || '' }}
+      AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME || '' }}
+      AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME || '' }}
+      AZURE_TRUSTED_SIGNING_PUBLISHER_NAME: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_TRUSTED_SIGNING_PUBLISHER_NAME || '' }}
     with:
       label: ${{ matrix.label }}
       runner: ${{ matrix.runner }}
@@ -261,7 +279,20 @@ jobs:
               cli: true,
             }
     uses: ./.github/workflows/release-desktop.yml
-    secrets: inherit
+    secrets:
+      CSC_LINK: ${{ needs.prepare.outputs.mode == 'publish' && secrets.CSC_LINK || '' }}
+      CSC_KEY_PASSWORD: ${{ needs.prepare.outputs.mode == 'publish' && secrets.CSC_KEY_PASSWORD || '' }}
+      APPLE_API_KEY: ${{ needs.prepare.outputs.mode == 'publish' && secrets.APPLE_API_KEY || '' }}
+      APPLE_API_KEY_ID: ${{ needs.prepare.outputs.mode == 'publish' && secrets.APPLE_API_KEY_ID || '' }}
+      APPLE_API_ISSUER: ${{ needs.prepare.outputs.mode == 'publish' && secrets.APPLE_API_ISSUER || '' }}
+      MACOS_PROVISIONING_PROFILE: ${{ needs.prepare.outputs.mode == 'publish' && secrets.MACOS_PROVISIONING_PROFILE || '' }}
+      AZURE_TENANT_ID: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_TENANT_ID || '' }}
+      AZURE_CLIENT_ID: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_CLIENT_ID || '' }}
+      AZURE_CLIENT_SECRET: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_CLIENT_SECRET || '' }}
+      AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_TRUSTED_SIGNING_ENDPOINT || '' }}
+      AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME || '' }}
+      AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME || '' }}
+      AZURE_TRUSTED_SIGNING_PUBLISHER_NAME: ${{ needs.prepare.outputs.mode == 'publish' && secrets.AZURE_TRUSTED_SIGNING_PUBLISHER_NAME || '' }}
     with:
       label: ${{ matrix.label }}
       runner: ${{ matrix.runner }}
@@ -283,7 +314,7 @@ jobs:
 
   publish:
     needs: [prepare, desktop, other_desktops]
-    if: needs.prepare.outputs.mode == 'publish'
+    if: always() && needs.prepare.outputs.mode == 'publish' && needs.desktop.result == 'success' && (needs.other_desktops.result == 'success' || needs.other_desktops.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: hd-release
@@ -320,13 +351,21 @@ jobs:
           path: release-assets
       - name: Merge updater manifests
         run: |
-          node scripts/merge-update-manifests.ts --platform mac release-assets/nightly-mac.yml release-assets/nightly-mac-x64.yml
-          node scripts/merge-update-manifests.ts --platform win release-assets/nightly-win-x64.yml release-assets/nightly-win-arm64.yml release-assets/nightly.yml
-          rm release-assets/nightly-mac-x64.yml release-assets/nightly-win-x64.yml release-assets/nightly-win-arm64.yml
+          if [[ -f release-assets/nightly-mac-x64.yml ]]; then
+            node scripts/merge-update-manifests.ts --platform mac release-assets/nightly-mac.yml release-assets/nightly-mac-x64.yml
+            rm release-assets/nightly-mac-x64.yml
+          fi
+          if [[ -f release-assets/nightly-win-x64.yml ]]; then
+            node scripts/merge-update-manifests.ts --platform win release-assets/nightly-win-x64.yml release-assets/nightly-win-arm64.yml release-assets/nightly.yml
+            rm release-assets/nightly-win-x64.yml release-assets/nightly-win-arm64.yml
+          fi
       - name: Write checksums and release notes
         run: |
           cd release-assets
-          sha256sum t3-*.tar.gz t3-*.zip > SHA256SUMS
+          shopt -s nullglob
+          archives=(t3-*.tar.gz t3-*.zip)
+          (( ${#archives[@]} > 0 ))
+          sha256sum "${archives[@]}" > SHA256SUMS
           node -e 'const fs = require("node:fs"); const m = JSON.parse(fs.readFileSync("hd-release.json")); fs.writeFileSync("../hd-release-notes.md", `HD Nightly ${m.version}\n\nUpstream: ${m.upstreamTag} (${m.upstreamSha})\n\nMaintenance: ${m.sourceSha}\n\nCandidate: ${m.candidateSha}\n\nOverlay commits: ${m.overlayCommits.join(", ")}\n\nHosted web and mobile are distributed separately.\n`);'
       - name: Publish complete release from a draft
         env:

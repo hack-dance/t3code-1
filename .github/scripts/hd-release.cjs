@@ -29,6 +29,25 @@ function releaseVersion(upstreamTag, runId, mode, now = new Date()) {
   return `${base}-${channel}.${date}.${runId}`;
 }
 
+/** A pilot must not strand an architecture already using the HD update feed. */
+function assertPublishCoverage(releases, targets) {
+  if (!["pilot", "all"].includes(targets)) throw new Error("Unknown HD target set.");
+  if (targets === "all") return;
+  const additionalPlatform = /(?:-darwin-x64|-linux-arm64|-win32-|-x64\.dmg$|\.exe$)/i;
+  if (
+    releases.some(
+      (release) =>
+        !release.draft &&
+        /^v\d+\.\d+\.\d+-nightly\./.test(release.tag_name) &&
+        release.assets?.some((asset) => additionalPlatform.test(asset.name)),
+    )
+  ) {
+    throw new Error(
+      "HD has shipped additional architectures; publish all targets to preserve their updates.",
+    );
+  }
+}
+
 function exec(command, args, cwd) {
   return ChildProcess.execFileSync(command, args, {
     cwd,
@@ -98,6 +117,7 @@ function prepareCandidate({ sourceDir, candidateDir, upstreamSha, overlayBase, s
 function main() {
   const mode = process.env.HD_MODE || "check";
   const channel = process.env.HD_UPSTREAM_CHANNEL || "nightly";
+  const targets = process.env.HD_TARGETS || "pilot";
   if (process.env.GITHUB_REPOSITORY !== config.repository)
     throw new Error("HD workflow is fork-only.");
   const releases = JSON.parse(
@@ -107,6 +127,17 @@ function main() {
   const commit = JSON.parse(
     exec("gh", ["api", `repos/${config.upstream}/commits/${release.tag_name}`]),
   );
+  if (mode === "publish") {
+    const prior = JSON.parse(
+      exec("gh", [
+        "api",
+        "--paginate",
+        "--slurp",
+        `repos/${config.repository}/releases?per_page=100`,
+      ]),
+    ).flat();
+    assertPublishCoverage(prior, targets);
+  }
   const sourceSha = exec("git", ["rev-parse", "HEAD"]);
   const version = releaseVersion(release.tag_name, process.env.GITHUB_RUN_ID, mode);
   const metadata = {
@@ -115,6 +146,7 @@ function main() {
     sourceSha,
     version,
     mode,
+    targets,
     repository: config.repository,
   };
   // Keep the pinned inputs even when replay fails, so an agent can reproduce
@@ -175,7 +207,7 @@ function main() {
   }
 }
 
-module.exports = { selectRelease, releaseVersion, prepareCandidate };
+module.exports = { selectRelease, releaseVersion, prepareCandidate, assertPublishCoverage };
 if (require.main === module) {
   try {
     main();
