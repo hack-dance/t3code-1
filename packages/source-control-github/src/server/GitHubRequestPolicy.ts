@@ -108,7 +108,7 @@ export function normalizeHost(host: string): string {
 
 /** Pins one credential before batching, so checkouts using the same account share a request. */
 export const withCredential =
-  (api: GitHubRequestPolicy["Service"], host: string) =>
+  (api: Pick<GitHubRequestPolicy["Service"], "credential">, host: string) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     Effect.gen(function* () {
       const normalized = normalizeHost(host);

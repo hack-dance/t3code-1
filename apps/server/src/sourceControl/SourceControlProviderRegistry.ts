@@ -335,15 +335,16 @@ export const makeWithProviders = Effect.fn("makeSourceControlProviderRegistryWit
               : Effect.succeed(requestedContext.remoteUrl)
             ).pipe(
               Effect.flatMap((url) =>
-                refineContext(input.cwd,
-                    url === requestedContext.remoteUrl
-                      ? requestedContext
-                      : {
-                          ...requestedContext,
-                          provider:
-                            detectSourceControlProviderFromRemoteUrl(url) ??
-                            requestedContext.provider,
-                        },
+                refineContext(
+                  input.cwd,
+                  url === requestedContext.remoteUrl
+                    ? requestedContext
+                    : {
+                        ...requestedContext,
+                        provider:
+                          detectSourceControlProviderFromRemoteUrl(url) ??
+                          requestedContext.provider,
+                      },
                 ),
               ),
             )
