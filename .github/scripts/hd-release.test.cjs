@@ -4,7 +4,12 @@ const Fs = require("node:fs");
 const Os = require("node:os");
 const Path = require("node:path");
 const { test } = require("node:test");
-const { selectRelease, releaseVersion, prepareCandidate } = require("./hd-release.cjs");
+const {
+  selectRelease,
+  releaseVersion,
+  prepareCandidate,
+  assertPublishCoverage,
+} = require("./hd-release.cjs");
 
 test("selects published upstream releases by channel and publication time", () => {
   const release = (tag_name, published_at, draft = false) => ({ tag_name, published_at, draft });
@@ -110,4 +115,31 @@ test("stops on a conflict with the patch and paths available for agent review", 
   );
   Assert.equal(f.git("rev-parse", "HEAD"), f.sourceSha);
   Assert.equal(Fs.readFileSync(Path.join(f.sourceDir, "fix.txt"), "utf8"), "fix\n");
+});
+
+test("pilot publication preserves all previously shipped HD architectures", () => {
+  const prior = (...names) => [
+    {
+      tag_name: "v1.2.3-nightly.20261015.1",
+      draft: false,
+      assets: names.map((name) => ({ name })),
+    },
+  ];
+  Assert.doesNotThrow(() => assertPublishCoverage([], "pilot"));
+  Assert.doesNotThrow(() =>
+    assertPublishCoverage(prior("t3-1.2.3-linux-x64.tar.gz", "T3-Code-1.2.3-arm64.dmg"), "pilot"),
+  );
+  for (const asset of [
+    "T3-Code-1.2.3-x64.dmg",
+    "t3-1.2.3-linux-arm64.tar.gz",
+    "t3-1.2.3-win32-x64.zip",
+    "T3-Code-Setup-1.2.3.exe",
+  ]) {
+    Assert.throws(() => assertPublishCoverage(prior(asset), "pilot"), /preserve their updates/);
+    Assert.doesNotThrow(() => assertPublishCoverage(prior(asset), "all"));
+  }
+  Assert.doesNotThrow(() =>
+    assertPublishCoverage([{ ...prior("other.exe")[0], draft: true }], "pilot"),
+  );
+  Assert.throws(() => assertPublishCoverage([], "unknown"), /Unknown/);
 });
