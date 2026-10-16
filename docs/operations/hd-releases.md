@@ -15,9 +15,11 @@ exact upstream release tag. Both upstream bases ship on the HD Nightly train.
   artifacts. `pilot` builds macOS arm64 and Linux x64; `all` also builds macOS x64,
   Linux arm64, and both Windows architectures. Candidates use preview versions
   and have no update feed. Test them with an isolated profile and copied state.
-- `publish` requires `all` targets, signing configuration, and the repository
+- `publish` requires signing configuration for the selected targets and the repository
   variable `HD_RELEASE_ENABLED=true`. It stages all assets in a draft release,
-  then publishes it. Configure required reviewers on the `hd-release` GitHub
+  then publishes it. A pilot publishes macOS arm64 and Linux x64. After HD has
+  shipped additional architectures, publication requires `all` so existing hosts
+  keep receiving updates. Configure required reviewers on the `hd-release` GitHub
   environment if publication should require approval.
 
 The workflow must exist on the fork's default branch for manual dispatch and
@@ -51,6 +53,9 @@ macOS publication requires `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY`,
 `APPLE_TEAM_ID` repository variable. Windows publication requires the Azure
 Trusted Signing secrets named by `release-desktop.yml`. Use our signing
 identities; upstream credentials are not available to the fork.
+
+The HD macOS app uses `dance.hack.t3code` under our Apple team. Its Nightly
+product name and state paths remain the same.
 
 Before enabling publication, verify macOS entitlements and account access with
 our signing identity, then test an HD-to-HD update. Keeping the upstream bundle
