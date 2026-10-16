@@ -1341,10 +1341,11 @@ it.effect(
     const { layer } = harness({
       remotes: remotesOutput(["origin", "git@github.com-work:acme/web.git"]),
       sshHostname: "github.com",
-      credential: (host) => Effect.gen(function* () {
-        assert.strictEqual(yield* GitHubCredentials.RepositoryDirectory, "/repo");
-        return { host, token: Redacted.make("token"), source: "gh" as const, fingerprint: host };
-      }),
+      credential: (host) =>
+        Effect.gen(function* () {
+          assert.strictEqual(yield* GitHubCredentials.RepositoryDirectory, "/repo");
+          return { host, token: Redacted.make("token"), source: "gh" as const, fingerprint: host };
+        }),
       graphql: (_lookup, call) => {
         hosts.push(call.host);
         return { pullRequests: { nodes: [node(7, "feature")] } };
@@ -1374,11 +1375,16 @@ it.effect("batches matching accounts across checkouts and separates different ac
       const fingerprints: string[] = [];
       const { layer, graphqlCalls } = harness({
         remotes: remotesOutput(["origin", "https://github.com/acme/web.git"]),
-        credential: (host) => Effect.gen(function* () {
-          const cwd = yield* GitHubCredentials.RepositoryDirectory;
-          return { host, token: Redacted.make("fake-token"), source: "gh" as const,
-            fingerprint: differentAccounts ? String(cwd) : "same-account" };
-        }),
+        credential: (host) =>
+          Effect.gen(function* () {
+            const cwd = yield* GitHubCredentials.RepositoryDirectory;
+            return {
+              host,
+              token: Redacted.make("fake-token"),
+              source: "gh" as const,
+              fingerprint: differentAccounts ? String(cwd) : "same-account",
+            };
+          }),
         graphql: (_lookup, call) => {
           fingerprints.push(call.host);
           return { pullRequests: { nodes: [node(7, "feature")] } };
