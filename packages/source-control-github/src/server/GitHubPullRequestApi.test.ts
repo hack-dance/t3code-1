@@ -162,7 +162,7 @@ const mockHttp = Layer.succeed(
 const layer = it.layer(
   GitHubPullRequestApi.layer.pipe(
     Layer.provideMerge(mockApi),
-    Layer.provideMerge(GitHubRequestPolicy.layer),
+    Layer.provideMerge(Layer.fresh(GitHubRequestPolicy.layer)),
     Layer.provideMerge(GitHubQuota.layer),
     Layer.provideMerge(SourceControlRateLimit.layer),
     Layer.provideMerge(mockHttp),
@@ -2532,7 +2532,11 @@ layer("GitHubPullRequestApi.layer", (it) => {
   it.effect("deletes a source branch using the same repository account as its safety checks", () =>
     Effect.gen(function* () {
       const authorizations: Array<string | undefined> = [];
-      const answers = [branchToDelete(), sourceBranch(), { data: { updateRefs: {} } }];
+      const answers = [
+        branchToDelete(),
+        sourceBranch(),
+        { data: { updateRefs: { clientMutationId: null } } },
+      ];
       const credentials = Layer.succeed(
         GitHubCredentials.GitHubCredentials,
         GitHubCredentials.GitHubCredentials.of({
@@ -2555,14 +2559,20 @@ layer("GitHubPullRequestApi.layer", (it) => {
         HttpClient.make((request) =>
           Effect.sync(() => {
             authorizations.push(request.headers["authorization"]);
-            return HttpClientResponse.fromWeb(request, new Response(encodeJson(answers.shift())));
+            return HttpClientResponse.fromWeb(
+              request,
+              new Response(encodeJson(answers.shift()), {
+                headers: { "content-type": "application/json" },
+              }),
+            );
           }),
         ),
       );
       const cli = yield* GitHubPullRequestApi.make.pipe(
         Effect.provide(
-          GitHubApi.layer.pipe(
-            Layer.provide(Layer.mergeAll(credentials, http)),
+          GitHubRest.layer.pipe(
+            Layer.provideMerge(Layer.fresh(GitHubRequestPolicy.layer)),
+            Layer.provideMerge(Layer.mergeAll(credentials, http)),
             Layer.provide(GitHubQuota.layer),
             Layer.provide(SourceControlRateLimit.layer),
             Layer.merge(TestSourceControlHost.layer()),
@@ -5091,6 +5101,7 @@ it.effect("loads PR details and files with the repo account rather than the acti
               ? new Response(encodeJson({ message: "Not Found" }), { status: 404 })
               : new Response(
                   encodeJson(request.url.endsWith("/graphql") ? coreResponse({ id: "PR_7" }) : []),
+                  { headers: { "content-type": "application/json" } },
                 ),
           ),
         ),
@@ -5099,8 +5110,8 @@ it.effect("loads PR details and files with the repo account rather than the acti
     const cli = yield* GitHubPullRequestApi.make.pipe(
       Effect.provide(
         GitHubRest.layer.pipe(
-          Layer.provideMerge(GitHubRequestPolicy.layer),
-          Layer.provide(
+          Layer.provideMerge(Layer.fresh(GitHubRequestPolicy.layer)),
+          Layer.provideMerge(
             Layer.mergeAll(credentials, http, GitHubQuota.layer, SourceControlRateLimit.layer),
           ),
           Layer.provideMerge(TestSourceControlHost.layer()),
@@ -5135,8 +5146,18 @@ layer("repo account batching", (it) => {
         Effect.gen(function* () {
           const cwd = yield* GitHubCredentials.RepositoryDirectory;
           directories.push(cwd);
-          const pullRequest = { ...coreResponse().data.repository.pullRequest, title: cwd };
-          return output(encodeJson({ data: { s0: { pullRequest }, s1: { pullRequest } } }));
+          const pullRequest = {
+            ...coreResponse().data.repository.pullRequest,
+            title: cwd,
+            latestReviews: { nodes: [] },
+            stack: null,
+            stackEntry: null,
+          };
+          return output(
+            encodeJson({
+              data: { _0_repository: { pullRequest }, _1_repository: { pullRequest } },
+            }),
+          );
         }),
       );
       const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
@@ -5181,7 +5202,9 @@ it.effect(
           return Effect.succeed(
             HttpClientResponse.fromWeb(
               request,
-              new Response(encodeJson({ id: 123, login: "work-user" })),
+              new Response(encodeJson({ id: 123, login: "work-user" }), {
+                headers: { "content-type": "application/json" },
+              }),
             ),
           );
         }),
@@ -5193,7 +5216,9 @@ it.effect(
     );
     return Effect.gen(function* () {
       const policy = yield* GitHubRequestPolicy.make;
-      const api = yield* GitHubRest.make.pipe(Effect.provideService(GitHubRequestPolicy.GitHubRequestPolicy, policy));
+      const api = yield* GitHubRest.make.pipe(
+        Effect.provideService(GitHubRequestPolicy.GitHubRequestPolicy, policy),
+      );
       const cli = yield* GitHubPullRequestApi.make.pipe(
         Effect.provideService(GitHubRest.GitHubRest, api),
         Effect.provideService(GitHubRequestPolicy.GitHubRequestPolicy, policy),

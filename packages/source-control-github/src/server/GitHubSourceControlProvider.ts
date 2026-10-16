@@ -218,6 +218,7 @@ function environmentTokenVariable(environment: NodeJS.ProcessEnv): string | null
  */
 export const makeDiscovery = Effect.gen(function* () {
   const api = yield* GitHubRest.GitHubRest;
+  const policy = yield* GitHubRequestPolicy.GitHubRequestPolicy;
   const sourceControlHost = yield* SourceControlHost.SourceControlHost;
   const process = sourceControlHost.process;
   const environment = yield* HostProcess.Environment;
@@ -453,6 +454,7 @@ const contextHost = (context: SourceControlProvider.SourceControlProviderContext
 
 export const make = Effect.gen(function* () {
   const api = yield* GitHubRest.GitHubRest;
+  const policy = yield* GitHubRequestPolicy.GitHubRequestPolicy;
   const sourceControlHost = yield* SourceControlHost.SourceControlHost;
   const process = sourceControlHost.process;
   const environment = yield* HostProcess.Environment;
@@ -543,7 +545,7 @@ export const make = Effect.gen(function* () {
   ) =>
     effect.pipe(
       GitHubGraphQlClient.call(target),
-      GitHubRequestPolicy.withCredential(api, target.host),
+      GitHubRequestPolicy.withCredential(policy, target.host),
       Effect.mapError((error) =>
         GraphQLClientError.isGraphQLClientError(error)
           ? failure(decodeDetail, error)
