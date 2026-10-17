@@ -5,6 +5,11 @@
  * depend on is deliberately unchanged: the bundle ID, package names, the
  * `t3code` URL schemes, state directories, and the Electron runtime name
  * (which keys desktop safe storage and the User-Agent product token).
+ *
+ * `productName` in apps/desktop/package.json is intentionally left as upstream
+ * has it: packaging takes its name from resolveDesktopProductName in
+ * scripts/build-desktop-artifact.ts, and leaving the file alone keeps merges
+ * from upstream clean.
  */
 export const HD_PRODUCT_NAME = "Hack the Planet";
 

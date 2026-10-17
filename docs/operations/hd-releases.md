@@ -65,9 +65,26 @@ set lives in `assets/hd` (see `assets/README.md`). The rebrand is display-only:
 the bundle ID, package names, executable names, release asset names, `t3code://`
 URL schemes, state directories, and the Electron runtime name stay as they were.
 The runtime name keys macOS Keychain and Linux secret-store entries, so renaming
-it would orphan stored credentials. An app updated in place keeps its existing
-bundle folder name (for example `T3 Code (Nightly).app`); fresh installs are
-named `Hack the Planet.app`.
+it would orphan stored credentials. Keychain prompts therefore still name
+"T3 Code Nightly".
+
+The packaged product name does change, which moves a few install paths on the
+first HD build that carries the rebrand:
+
+- macOS: the executable inside the bundle becomes `Contents/MacOS/Hack the
+Planet`. An in-place update keeps the existing bundle folder name (for example
+  `T3 Code (Nightly).app`); a fresh DMG install is `Hack the Planet.app` and
+  leaves any older bundle in place, so remove the old one by hand.
+- Linux deb: the install directory moves from `/opt/T3 Code (Nightly)` to
+  `/opt/Hack the Planet`. The package name, `t3code` executable, and
+  `t3code.desktop` entry are unchanged. AppImage updates replace the file in
+  place.
+- Windows: updates reuse the registered install folder, but the executable
+  becomes `Hack the Planet.exe`, so taskbar pins to the old executable go stale.
+- The `t3` CLI shim and Linux URL handler record the desktop executable's
+  absolute path. The app rewrites both on its next launch, so the old path only
+  lingers between an update and the relaunch that follows it. Scripts outside
+  this repository that hard-code the old app or executable name need updating.
 
 Before enabling publication, verify macOS entitlements and account access with
 our signing identity, then test an HD-to-HD update. Keeping the upstream bundle

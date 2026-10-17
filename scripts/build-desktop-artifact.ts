@@ -2630,7 +2630,8 @@ export function isDesktopPreviewVersion(version: string): boolean {
   return /-pr\./.test(version) || /-preview\.\d{8}\.\d+$/.test(version);
 }
 
-// HD builds use the fork's artwork on every update channel.
+// HD builds use the fork's artwork and name on every update channel. These
+// resolvers keep their upstream version parameter so call sites merge cleanly.
 export function resolveDesktopWebAssetBrand(_version: string): WebAssetBrand {
   return "hd";
 }
