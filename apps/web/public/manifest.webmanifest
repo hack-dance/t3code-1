@@ -1,5 +1,7 @@
 {
   "id": "/",
+  "name": "Hack the Planet",
+  "short_name": "Hack the Planet",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

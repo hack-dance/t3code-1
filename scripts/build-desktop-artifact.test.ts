@@ -267,28 +267,24 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
   });
 
-  it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.1.0"), "T3 Code (Beta)");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
+  it("uses the HD product name for every desktop channel", () => {
+    assert.equal(resolveDesktopProductName("0.1.0"), "Hack the Planet");
+    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "Hack the Planet");
   });
 
-  it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
-    assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.17"), {
-      macIconPng: BRAND_ASSET_PATHS.productionMacIconPng,
-      linuxIconPng: BRAND_ASSET_PATHS.productionLinuxIconPng,
-      windowsIconIco: BRAND_ASSET_PATHS.productionWindowsIconIco,
-    });
-
-    assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.17-nightly.20260413.42"), {
-      macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
-      linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
-      windowsIconIco: BRAND_ASSET_PATHS.nightlyWindowsIconIco,
-    });
+  it("uses the HD artwork for desktop packaging icons on every channel", () => {
+    const hdIcons = {
+      macIconPng: BRAND_ASSET_PATHS.hdMacIconPng,
+      linuxIconPng: BRAND_ASSET_PATHS.hdLinuxIconPng,
+      windowsIconIco: BRAND_ASSET_PATHS.hdWindowsIconIco,
+    };
+    assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.17"), hdIcons);
+    assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.17-nightly.20260413.42"), hdIcons);
   });
 
-  it("switches the bundled splash and favicon branding for nightly versions", () => {
-    assert.equal(resolveDesktopWebAssetBrand("0.0.17"), "production");
-    assert.equal(resolveDesktopWebAssetBrand("0.0.17-nightly.20260413.42"), "nightly");
+  it("uses the HD splash and favicon branding on every channel", () => {
+    assert.equal(resolveDesktopWebAssetBrand("0.0.17"), "hd");
+    assert.equal(resolveDesktopWebAssetBrand("0.0.17-nightly.20260413.42"), "hd");
   });
 
   it.effect("resolves GitHub desktop publish config from Effect config", () =>
@@ -682,7 +678,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         "**/*.map",
       ]);
       assert.deepStrictEqual(mac.dmg, {
-        title: "T3 Code (Beta) 1.2.3 Installer",
+        title: "Hack the Planet 1.2.3 Installer",
         background: "dmg/dmg-background-latest.png",
         window: { width: 640, height: 432 },
         contents: [
@@ -721,7 +717,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.propertyVal(
         (mac.mac as Record<string, unknown>).extendInfo as Record<string, unknown>,
         "NSLocalNetworkUsageDescription",
-        "T3 Code connects to devices on your local network for remote environments and commands run by terminals and coding agents.",
+        "Hack the Planet connects to devices on your local network for remote environments and commands run by terminals and coding agents.",
       );
       for (const config of [linux, win]) {
         assert.deepStrictEqual(config.electronLanguages, DESKTOP_ELECTRON_LANGUAGES);

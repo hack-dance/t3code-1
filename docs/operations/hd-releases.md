@@ -54,8 +54,20 @@ macOS publication requires `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_API_KEY`,
 Trusted Signing secrets named by `release-desktop.yml`. Use our signing
 identities; upstream credentials are not available to the fork.
 
-The HD macOS app uses `dance.hack.t3code` under our Apple team. Its Nightly
-product name and state paths remain the same.
+The HD macOS app uses `dance.hack.t3code` under our Apple team. State paths are
+unchanged from upstream.
+
+## Branding
+
+HD builds are branded **Hack the Planet** with the HACK globe icon on every
+update channel. The name lives in `packages/shared/src/hdBranding.ts`; the icon
+set lives in `assets/hd` (see `assets/README.md`). The rebrand is display-only:
+the bundle ID, package names, executable names, release asset names, `t3code://`
+URL schemes, state directories, and the Electron runtime name stay as they were.
+The runtime name keys macOS Keychain and Linux secret-store entries, so renaming
+it would orphan stored credentials. An app updated in place keeps its existing
+bundle folder name (for example `T3 Code (Nightly).app`); fresh installs are
+named `Hack the Planet.app`.
 
 Before enabling publication, verify macOS entitlements and account access with
 our signing identity, then test an HD-to-HD update. Keeping the upstream bundle

@@ -6,6 +6,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import { HD_ELECTRON_RUNTIME_BASE_NAME } from "@t3tools/shared/hdBranding";
 
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as DesktopAssets from "./DesktopAssets.ts";
@@ -94,8 +95,10 @@ export const make = Effect.gen(function* () {
     // Electron removes spaces from this name to build the native User-Agent
     // product token, but leaves parentheses intact. Keep the runtime name valid
     // without rewriting preview sessions (which breaks Turnstile, #7110).
+    // The HD product name is display-only: the runtime name also keys safe
+    // storage, so it keeps the original base name.
     yield* electronApp.setName(
-      `${environment.branding.baseName} ${environment.branding.stageLabel}`,
+      `${HD_ELECTRON_RUNTIME_BASE_NAME} ${environment.branding.stageLabel}`,
     );
     yield* electronApp.setAboutPanelOptions({
       applicationName: environment.displayName,

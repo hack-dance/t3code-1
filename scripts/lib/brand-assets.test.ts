@@ -4,6 +4,7 @@ import {
   BRAND_ASSET_PATHS,
   DEVELOPMENT_ICON_OVERRIDES,
   DEVELOPMENT_PUBLIC_ICON_OVERRIDES,
+  HD_SERVER_CLIENT_ICON_OVERRIDES,
   resolveWebAssetBrandForChannel,
   resolveWebAssetBrandForPackageVersion,
   resolveWebIconOverrides,
@@ -71,6 +72,28 @@ describe("brand-assets", () => {
       sourceRelativePath: BRAND_ASSET_PATHS.nightlyWebFaviconIco,
       targetRelativePath: "apps/web/dist/favicon.ico",
     });
+  });
+
+  it("maps HD web assets to the fork artwork", () => {
+    expect(resolveWebIconOverrides("hd", "dist/client")).toEqual([
+      {
+        sourceRelativePath: BRAND_ASSET_PATHS.hdWebFaviconIco,
+        targetRelativePath: "dist/client/favicon.ico",
+      },
+      {
+        sourceRelativePath: BRAND_ASSET_PATHS.hdWebFavicon16Png,
+        targetRelativePath: "dist/client/favicon-16x16.png",
+      },
+      {
+        sourceRelativePath: BRAND_ASSET_PATHS.hdWebFavicon32Png,
+        targetRelativePath: "dist/client/favicon-32x32.png",
+      },
+      {
+        sourceRelativePath: BRAND_ASSET_PATHS.hdWebAppleTouchIconPng,
+        targetRelativePath: "dist/client/apple-touch-icon.png",
+      },
+    ]);
+    expect(HD_SERVER_CLIENT_ICON_OVERRIDES).toEqual(resolveWebIconOverrides("hd", "dist/client"));
   });
 
   it("maps hosted release channels to web asset brands", () => {

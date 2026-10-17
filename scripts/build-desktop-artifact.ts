@@ -18,6 +18,7 @@ import {
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
+import { HD_PRODUCT_NAME } from "@t3tools/shared/hdBranding";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
 import desktopPackageJson from "../apps/desktop/package.json" with { type: "json" };
@@ -25,11 +26,7 @@ import gnomeCaptureBundle from "../apps/desktop/gnome-extension/bundle.json" wit
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 
 import { applyWebBrandAssets } from "./apply-web-brand-assets.ts";
-import {
-  BRAND_ASSET_PATHS,
-  resolveWebAssetBrandForChannel,
-  type WebAssetBrand,
-} from "./lib/brand-assets.ts";
+import { BRAND_ASSET_PATHS, type WebAssetBrand } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import {
   findInlinedExternalPackages,
@@ -2633,23 +2630,16 @@ export function isDesktopPreviewVersion(version: string): boolean {
   return /-pr\./.test(version) || /-preview\.\d{8}\.\d+$/.test(version);
 }
 
-export function resolveDesktopWebAssetBrand(version: string): WebAssetBrand {
-  return resolveWebAssetBrandForChannel(resolveDesktopUpdateChannel(version));
+// HD builds use the fork's artwork on every update channel.
+export function resolveDesktopWebAssetBrand(_version: string): WebAssetBrand {
+  return "hd";
 }
 
-export function resolveDesktopBuildIconAssets(version: string): DesktopBuildIconAssets {
-  if (resolveDesktopUpdateChannel(version) === "nightly") {
-    return {
-      macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
-      linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
-      windowsIconIco: BRAND_ASSET_PATHS.nightlyWindowsIconIco,
-    };
-  }
-
+export function resolveDesktopBuildIconAssets(_version: string): DesktopBuildIconAssets {
   return {
-    macIconPng: BRAND_ASSET_PATHS.productionMacIconPng,
-    linuxIconPng: BRAND_ASSET_PATHS.productionLinuxIconPng,
-    windowsIconIco: BRAND_ASSET_PATHS.productionWindowsIconIco,
+    macIconPng: BRAND_ASSET_PATHS.hdMacIconPng,
+    linuxIconPng: BRAND_ASSET_PATHS.hdLinuxIconPng,
+    windowsIconIco: BRAND_ASSET_PATHS.hdWindowsIconIco,
   };
 }
 
@@ -2670,10 +2660,11 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
   return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
 }
 
-export function resolveDesktopProductName(version: string): string {
-  return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code");
+// User-visible bundle name (CFBundleName, Linux desktop entry, Windows file
+// description). The bundle ID, executable names, and URL schemes are unchanged
+// so existing installs upgrade in place.
+export function resolveDesktopProductName(_version: string): string {
+  return HD_PRODUCT_NAME;
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -2747,10 +2738,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       extendInfo: {
         // macOS 26 offers Messages/Mail codes in every text field unless opted out.
         NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
-        NSLocalNetworkUsageDescription:
-          "T3 Code connects to devices on your local network for remote environments and commands run by terminals and coding agents.",
-        NSScreenCaptureUsageDescription:
-          "T3 Code captures the active window when you use the window capture shortcut.",
+        NSLocalNetworkUsageDescription: `${HD_PRODUCT_NAME} connects to devices on your local network for remote environments and commands run by terminals and coding agents.`,
+        NSScreenCaptureUsageDescription: `${HD_PRODUCT_NAME} captures the active window when you use the window capture shortcut.`,
         // macOS lists an app under Default web browser only when it opens web
         // pages as documents as well as http and https links (see protocols).
         CFBundleDocumentTypes: [
@@ -3743,8 +3732,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     ...(macWebAuthn ? { t3codeWebAuthn: macWebAuthn } : {}),
     private: true,
     packageManager: rootPackageJson.packageManager,
-    description:
-      "T3 Code is an open-source desktop app for coding agents. Work with your existing agent subscriptions, review code changes, and run commands in your projects. Connect from desktop, web, or mobile to continue working remotely.",
+    description: `${HD_PRODUCT_NAME} is an open-source desktop app for coding agents. Work with your existing agent subscriptions, review code changes, and run commands in your projects. Connect from desktop, web, or mobile to continue working remotely.`,
     license: "MIT",
     homepage: "https://t3.codes",
     author: "T3 Tools",

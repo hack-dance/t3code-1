@@ -23,6 +23,17 @@ export const BRAND_ASSET_PATHS = {
   nightlyWebFavicon32Png: "assets/nightly/nightly-web-favicon-32x32.png",
   nightlyWebAppleTouchIconPng: "assets/nightly/nightly-web-apple-touch-180.png",
 
+  // Hack Dance fork artwork. Raster-derived from hdMasterPng rather than an
+  // Icon Composer project; see assets/README.md.
+  hdMasterPng: "assets/hd/hd-master-1024.png",
+  hdMacIconPng: "assets/hd/hd-macos-1024.png",
+  hdLinuxIconPng: "assets/hd/hd-universal-1024.png",
+  hdWindowsIconIco: "assets/hd/hd-windows.ico",
+  hdWebFaviconIco: "assets/hd/hd-web-favicon.ico",
+  hdWebFavicon16Png: "assets/hd/hd-web-favicon-16x16.png",
+  hdWebFavicon32Png: "assets/hd/hd-web-favicon-32x32.png",
+  hdWebAppleTouchIconPng: "assets/hd/hd-web-apple-touch-180.png",
+
   developmentDesktopIconPng: "assets/dev/blueprint-macos-1024.png",
   developmentWindowsIconIco: "assets/dev/blueprint-windows.ico",
   developmentWebFaviconIco: "assets/dev/blueprint-web-favicon.ico",
@@ -31,7 +42,7 @@ export const BRAND_ASSET_PATHS = {
   developmentWebAppleTouchIconPng: "assets/dev/blueprint-web-apple-touch-180.png",
 } as const;
 
-export type WebAssetBrand = "development" | "nightly" | "production";
+export type WebAssetBrand = "development" | "nightly" | "production" | "hd";
 
 export const WEB_ASSET_CHANNELS = ["latest", "nightly"] as const;
 
@@ -76,6 +87,12 @@ const WEB_ICON_SOURCE_PATHS_BY_BRAND = {
     favicon32Png: BRAND_ASSET_PATHS.productionWebFavicon32Png,
     appleTouchIconPng: BRAND_ASSET_PATHS.productionWebAppleTouchIconPng,
   },
+  hd: {
+    faviconIco: BRAND_ASSET_PATHS.hdWebFaviconIco,
+    favicon16Png: BRAND_ASSET_PATHS.hdWebFavicon16Png,
+    favicon32Png: BRAND_ASSET_PATHS.hdWebFavicon32Png,
+    appleTouchIconPng: BRAND_ASSET_PATHS.hdWebAppleTouchIconPng,
+  },
 } as const satisfies Record<WebAssetBrand, Record<keyof typeof WEB_ICON_TARGET_FILENAMES, string>>;
 
 export function resolveWebIconOverrides(
@@ -104,6 +121,9 @@ export function resolveWebIconOverrides(
 }
 
 export const DEVELOPMENT_ICON_OVERRIDES = resolveWebIconOverrides("development", "dist/client");
+
+// Packaged HD servers (CLI archives and the desktop sidecar) ship the HD icons.
+export const HD_SERVER_CLIENT_ICON_OVERRIDES = resolveWebIconOverrides("hd", "dist/client");
 
 export const DEVELOPMENT_PUBLIC_ICON_OVERRIDES = resolveWebIconOverrides(
   "development",
