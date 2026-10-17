@@ -7,6 +7,7 @@ const { test } = require("node:test");
 const {
   selectRelease,
   selectMergedRelease,
+  headCandidates,
   releaseVersion,
   prepareCandidate,
   assertPublishCoverage,
@@ -147,6 +148,40 @@ test("head builds use the newest upstream release already merged into maintenanc
     /contains none/,
   );
   Assert.equal(f.git("rev-parse", "HEAD"), sourceSha);
+});
+
+test("head candidates cover every release, or only the pinned one", () => {
+  const releases = Array.from({ length: 60 }, (_, index) => ({
+    tag_name: `v1.2.4-nightly.20261001.${index}`,
+    published_at: new Date(Date.UTC(2026, 9, 1, 0, index)).toISOString(),
+  }));
+  const resolve = (tag) => (tag.endsWith(".0") ? "a".repeat(40) : null);
+  const all = headCandidates(releases, "nightly", undefined, resolve);
+  Assert.equal(all.length, 60);
+  Assert.equal(all[0].tag, "v1.2.4-nightly.20261001.59");
+  Assert.equal(all.at(-1).sha, "a".repeat(40));
+  const pinned = headCandidates(releases, "nightly", "v1.2.4-nightly.20261001.3", resolve);
+  Assert.deepEqual(
+    pinned.map((item) => [item.tag, item.sha]),
+    [["v1.2.4-nightly.20261001.3", null]],
+  );
+  Assert.throws(() => headCandidates(releases, "nightly", "v9.9.9", resolve), /No published/);
+});
+
+test("head selection skips missing tags and accepts the release commit itself", (t) => {
+  const f = fixture(t);
+  const release = f.commit("upstream.txt", "one\n", "upstream one");
+  Assert.equal(
+    selectMergedRelease({
+      sourceDir: f.sourceDir,
+      sourceSha: release,
+      candidates: [
+        { tag: "missing", sha: null },
+        { tag: "v1.2.4-nightly.20261015.1", sha: release },
+      ],
+    }).tag,
+    "v1.2.4-nightly.20261015.1",
+  );
 });
 
 test("pilot publication preserves all previously shipped HD architectures", () => {

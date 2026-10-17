@@ -27,7 +27,8 @@ exact upstream release tag. Both upstream bases ship on the HD Nightly train.
 
 - `head` (default) builds the pushed commit as-is. The upstream base is the pinned
   tag, or else the newest published upstream release already in the commit's
-  history; the run fails if the commit contains none of them. Nothing is pushed.
+  history; the run fails if the commit contains none of them. Pin the tag that was
+  actually merged so the version base matches it. Nothing is pushed.
 - `replay` is the older flow: it replays the HD commits above
   `.github/hd-release.json`'s `overlayBase` onto the selected upstream release and
   pushes an `hd/candidate/*` branch with the workflow token. It only works while

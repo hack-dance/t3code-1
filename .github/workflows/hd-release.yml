@@ -146,7 +146,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - name: Checkout candidate
+      - name: Checkout release source
         env:
           CHECKOUT_REF: ${{ needs.prepare.outputs.ref }}
           GIT_TERMINAL_PROMPT: "0"
@@ -333,7 +333,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout candidate
+      - name: Checkout release source
         env:
           CHECKOUT_REF: ${{ needs.prepare.outputs.ref }}
           GIT_TERMINAL_PROMPT: "0"
@@ -380,7 +380,7 @@ jobs:
           archives=(t3-*.tar.gz t3-*.zip)
           (( ${#archives[@]} > 0 ))
           sha256sum "${archives[@]}" > SHA256SUMS
-          node -e 'const fs = require("node:fs"); const m = JSON.parse(fs.readFileSync("hd-release.json")); const parts = [`HD Nightly ${m.version}`, `Upstream: ${m.upstreamTag} (${m.upstreamSha})`, `Maintenance: ${m.sourceSha}`]; if (m.candidateSha) parts.push(`Candidate: ${m.candidateSha}`, `Overlay commits: ${(m.overlayCommits || []).join(", ")}`); parts.push("Hosted web and mobile are distributed separately."); fs.writeFileSync("../hd-release-notes.md", parts.join("\n\n") + "\n");'
+          node -e 'const fs = require("node:fs"); const m = JSON.parse(fs.readFileSync("hd-release.json")); const parts = [`HD Nightly ${m.version}`, `Upstream: ${m.upstreamTag} (${m.upstreamSha})`, `Maintenance: ${m.sourceSha}`, `Source: ${m.source || "replay"}`]; if (m.candidateSha) parts.push(`Candidate: ${m.candidateSha}`, `Overlay commits: ${(m.overlayCommits || []).join(", ")}`); parts.push("Hosted web and mobile are distributed separately."); fs.writeFileSync("../hd-release-notes.md", parts.join("\n\n") + "\n");'
       - name: Publish complete release from a draft
         env:
           GH_TOKEN: ${{ github.token }}
@@ -388,7 +388,7 @@ jobs:
           HD_REF: ${{ needs.prepare.outputs.ref }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/hd/nightly" --jq .object.sha > current-maintenance-sha.txt
-          node -e 'const fs = require("node:fs"); const m = JSON.parse(fs.readFileSync("release-assets/hd-release.json")); if (fs.readFileSync("current-maintenance-sha.txt", "utf8").trim() !== m.sourceSha) throw new Error("HD maintenance changed during this build; prepare a new candidate.");'
+          node -e 'const fs = require("node:fs"); const m = JSON.parse(fs.readFileSync("release-assets/hd-release.json")); if (fs.readFileSync("current-maintenance-sha.txt", "utf8").trim() !== m.sourceSha) throw new Error("HD maintenance changed during this build; run the release again.");'
           gh release create "v$HD_VERSION" --repo "$GITHUB_REPOSITORY" --draft --prerelease --target "$HD_REF" --title "HD Nightly $HD_VERSION" --notes-file hd-release-notes.md
           gh release upload "v$HD_VERSION" --repo "$GITHUB_REPOSITORY" release-assets/*
           gh release edit "v$HD_VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false

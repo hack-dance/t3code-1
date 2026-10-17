@@ -15,9 +15,7 @@ function channelReleases(releases, channel) {
 }
 
 function selectRelease(releases, channel, tag) {
-  const release = channelReleases(releases, channel).filter(
-    (item) => !tag || item.tag_name === tag,
-  )[0];
+  const release = channelReleases(releases, channel).find((item) => !tag || item.tag_name === tag);
   if (!release)
     throw new Error(`No published upstream ${channel} release${tag ? ` matching ${tag}` : ""}.`);
   return release;
@@ -52,6 +50,21 @@ function assertPublishCoverage(releases, targets) {
       "HD has shipped additional architectures; publish all targets to preserve their updates.",
     );
   }
+}
+
+/**
+ * Head source candidates, newest first: the pinned release only, or every published release
+ * of the channel. `resolve` maps a tag to its upstream commit, or null when it is missing.
+ */
+function headCandidates(releases, channel, pinned, resolve) {
+  const ordered = pinned
+    ? [selectRelease(releases, channel, pinned)]
+    : channelReleases(releases, channel);
+  return ordered.map((item) => ({
+    tag: item.tag_name,
+    sha: resolve(item.tag_name),
+    release: item,
+  }));
 }
 
 /**
@@ -149,6 +162,8 @@ function main() {
     throw new Error("HD workflow is fork-only.");
   const source = process.env.HD_SOURCE || "head";
   if (!["head", "replay"].includes(source)) throw new Error("Unknown HD source.");
+  if (process.env.HD_UPSTREAM_TAG && !/^v[\w.-]+$/.test(process.env.HD_UPSTREAM_TAG))
+    throw new Error("Invalid upstream tag.");
   const releases = JSON.parse(
     exec("gh", ["api", "--paginate", "--slurp", `repos/${config.upstream}/releases?per_page=100`]),
   ).flat();
@@ -164,24 +179,33 @@ function main() {
       `https://github.com/${config.upstream}.git`,
       "+refs/tags/*:refs/hd-upstream/tags/*",
     ]);
-    const ordered = process.env.HD_UPSTREAM_TAG
-      ? [release]
-      : channelReleases(releases, channel).slice(0, 50);
-    const candidates = ordered.map((item) => {
-      let sha = null;
+    const candidates = headCandidates(releases, channel, process.env.HD_UPSTREAM_TAG, (tag) => {
       try {
-        sha = exec("git", [
+        return exec("git", [
           "rev-parse",
           "--verify",
           "--quiet",
-          `refs/hd-upstream/tags/${item.tag_name}^{commit}`,
+          `refs/hd-upstream/tags/${tag}^{commit}`,
         ]);
       } catch {
-        // A release whose tag is missing upstream cannot be the merged base.
+        return null; // A release whose tag is missing upstream cannot be the merged base.
       }
-      return { tag: item.tag_name, sha, release: item };
     });
-    const merged = selectMergedRelease({ sourceDir: process.cwd(), sourceSha, candidates });
+    let merged;
+    try {
+      merged = selectMergedRelease({ sourceDir: process.cwd(), sourceSha, candidates });
+    } catch (error) {
+      // Keep the inputs for the failed run, as the replay path does.
+      Fs.writeFileSync(
+        "hd-release.json",
+        JSON.stringify(
+          { sourceSha, mode, source, targets, upstreamTag: process.env.HD_UPSTREAM_TAG || null },
+          null,
+          2,
+        ) + "\n",
+      );
+      throw error;
+    }
     release = merged.release;
     commit = { sha: merged.sha };
   } else {
@@ -272,6 +296,7 @@ function main() {
 module.exports = {
   selectRelease,
   selectMergedRelease,
+  headCandidates,
   releaseVersion,
   prepareCandidate,
   assertPublishCoverage,
