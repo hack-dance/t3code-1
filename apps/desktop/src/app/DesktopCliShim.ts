@@ -2,6 +2,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import { HD_PRODUCT_NAME } from "@t3tools/shared/hdBranding";
 
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import { makeComponentLogger } from "./DesktopObservability.ts";
@@ -19,7 +20,7 @@ const shellWord = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
 const cmdText = (value: string) => value.replaceAll("%", "%%");
 const cmdWord = (value: string) => `"${cmdText(value)}"`;
 
-const MOVED = "T3 Code has moved or been removed. Open the app once to update this command.";
+const MOVED = `${HD_PRODUCT_NAME} has moved or been removed. Open the app once to update this command.`;
 
 export type CliShimTarget =
   | { readonly kind: "appimage"; readonly appImage: string; readonly executableName: string }
@@ -171,3 +172,19 @@ export const install = Effect.gen(function* () {
     Effect.withSpan("desktop.cliShim.install"),
   );
 });
+
+/**
+ * HD: the rebrand renamed the packaged executable, and `install` otherwise runs
+ * only when a native local backend is configured. Refresh a launcher the app
+ * already wrote on every packaged startup so it follows the current executable.
+ */
+export const refreshExisting = Effect.gen(function* () {
+  const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  if (!environment.isPackaged) return;
+  const fs = yield* FileSystem.FileSystem;
+  const exists = yield* fs
+    .exists(launcherPath(environment))
+    .pipe(Effect.orElseSucceed(() => false));
+  if (!exists) return;
+  yield* install;
+}).pipe(Effect.withSpan("desktop.cliShim.refreshExisting"));
