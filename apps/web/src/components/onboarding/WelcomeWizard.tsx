@@ -10,6 +10,7 @@ import type {
   ServerProvider,
 } from "@t3tools/contracts";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { HD_PRODUCT_NAME } from "@t3tools/shared/hdBranding";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -84,7 +85,6 @@ import { TerminalViewport } from "../ThreadTerminalDrawer";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
 import { presentSavedCloudEnvironmentConnection } from "../cloud/cloudEnvironmentConnectionPresentation";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
-import { T3Wordmark } from "../T3Wordmark";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { CommandBlock } from "../CommandBlock";
@@ -222,12 +222,12 @@ export function WelcomeWizard({
         initialFocus={() => document.getElementById("onboarding-pairing-url") ?? true}
       >
         <WizardHeader
-          title="Set up T3 Code"
+          title={`Set up ${HD_PRODUCT_NAME}`}
           identity={
-            <div className="flex items-baseline gap-1.5" role="img" aria-label="T3 Code">
-              <T3Wordmark className="h-4 w-auto shrink-0" aria-hidden />
+            <div className="flex items-baseline gap-1.5" role="img" aria-label={HD_PRODUCT_NAME}>
+              <span className="text-2xl font-medium tracking-tight">Hack</span>
               <span className="text-2xl font-medium tracking-tight text-muted-foreground">
-                Code
+                the Planet
               </span>
             </div>
           }

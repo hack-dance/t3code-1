@@ -9,7 +9,7 @@ import * as Path from "effect/Path";
 import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { DEVELOPMENT_ICON_OVERRIDES } from "../../../scripts/lib/brand-assets.ts";
+import { HD_SERVER_CLIENT_ICON_OVERRIDES } from "../../../scripts/lib/brand-assets.ts";
 import { findEsmImportsOfExternalPackages } from "../../../scripts/lib/cli-executable-imports.ts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import {
@@ -46,7 +46,7 @@ const applyDevelopmentIconOverrides = Effect.fn("applyDevelopmentIconOverrides")
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
 
-  for (const override of DEVELOPMENT_ICON_OVERRIDES) {
+  for (const override of HD_SERVER_CLIENT_ICON_OVERRIDES) {
     const sourcePath = path.join(repoRoot, override.sourceRelativePath);
     const targetPath = path.join(serverDir, override.targetRelativePath);
 
@@ -60,7 +60,7 @@ const applyDevelopmentIconOverrides = Effect.fn("applyDevelopmentIconOverrides")
     yield* fs.copyFile(sourcePath, targetPath);
   }
 
-  yield* Effect.log("[cli] Applied development icon overrides to dist/client");
+  yield* Effect.log("[cli] Applied HD icon overrides to dist/client");
 });
 
 const buildCmd = Command.make(

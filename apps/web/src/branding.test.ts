@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
+  formatAppDisplayName,
   resolveServerBackedAppDisplayName,
   resolveServerBackedAppStageLabel,
 } from "./branding.logic";
@@ -47,7 +48,7 @@ describe("branding", () => {
     expect(branding.HOSTED_APP_CHANNEL).toBe("nightly");
     expect(branding.HOSTED_APP_CHANNEL_LABEL).toBe("Nightly");
     expect(branding.APP_STAGE_LABEL).toBe("Nightly");
-    expect(branding.APP_DISPLAY_NAME).toBe("T3 Code (Nightly)");
+    expect(branding.APP_DISPLAY_NAME).toBe("Hack the Planet");
   });
 
   it("does not label the latest hosted app channel", async () => {
@@ -58,7 +59,7 @@ describe("branding", () => {
     expect(branding.HOSTED_APP_CHANNEL).toBe("latest");
     expect(branding.HOSTED_APP_CHANNEL_LABEL).toBe("Latest");
     expect(branding.APP_STAGE_LABEL).toBe("Latest");
-    expect(branding.APP_DISPLAY_NAME).toBe("T3 Code");
+    expect(branding.APP_DISPLAY_NAME).toBe("Hack the Planet");
   });
 
   it("ignores unknown hosted app channels", async () => {
@@ -81,15 +82,32 @@ describe("branding logic", () => {
     ).toBe("Nightly");
   });
 
-  it("updates the display name for nightly primary server versions", () => {
+  it("drops the stage suffix for nightly primary server versions", () => {
     expect(
       resolveServerBackedAppDisplayName({
-        baseName: "T3 Code",
-        fallbackDisplayName: "T3 Code (Alpha)",
+        baseName: "Hack the Planet",
+        fallbackDisplayName: "Hack the Planet (Alpha)",
         fallbackStageLabel: "Alpha",
         primaryServerVersion: "0.0.28-nightly.20260616.12",
       }),
-    ).toBe("T3 Code (Nightly)");
+    ).toBe("Hack the Planet");
+  });
+
+  it("keeps only the development stage suffix", () => {
+    expect(formatAppDisplayName({ baseName: "Hack the Planet", stageLabel: "Dev" })).toBe(
+      "Hack the Planet (Dev)",
+    );
+    for (const stageLabel of ["Alpha", "Beta", "Nightly", "Latest"]) {
+      expect(formatAppDisplayName({ baseName: "Hack the Planet", stageLabel })).toBe(
+        "Hack the Planet",
+      );
+    }
+  });
+
+  it("defaults to the HD product name without injected desktop branding", async () => {
+    const branding = await import("./branding");
+
+    expect(branding.APP_BASE_NAME).toBe("Hack the Planet");
   });
 
   it("keeps the fallback display name for stable primary server versions", () => {

@@ -65,3 +65,25 @@ is instead rendered from the same Icon Composer SVG sources by `vp run icons:exp
 
 Rerun the export after changing a layer SVG. `android-icon-mark.png` remains a flat silhouette for
 Android's monochrome themed icon.
+
+## Hack Dance artwork
+
+HD release builds use the raster icon set in `hd/` instead of the Icon Composer
+projects. `hd/hd-master-1024.png` is the full-bleed square source. The other
+files are derived from it and should be regenerated together whenever the
+master changes:
+
+- `hd-universal-1024.png`: the master clipped to the same rounded-square mask as
+  `nightly/nightly-universal-1024.png`, with transparent corners. This is the
+  Linux icon source.
+- `hd-macos-1024.png`: the universal icon scaled to the classic 824×824 body,
+  inset 100 px, over the same shadow silhouette as
+  `nightly/nightly-macos-1024.png`. The desktop build turns it into `icon.icns`.
+- `hd-windows.ico` and `hd-web-favicon.ico`: 16, 24, 32, 48, 64, 128, and
+  256 px PNG renditions of the universal icon.
+- `hd-web-favicon-16x16.png`, `hd-web-favicon-32x32.png`, and
+  `hd-web-apple-touch-180.png`: downscaled universal renditions.
+
+`vp run icons:export` and `icons:check` do not touch `hd/`. Packaged desktop
+builds and server builds select these files through `BRAND_ASSET_PATHS.hd*` in
+`scripts/lib/brand-assets.ts`.

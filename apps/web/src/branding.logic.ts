@@ -4,7 +4,8 @@ export function formatAppDisplayName(input: {
   readonly baseName: string;
   readonly stageLabel: string;
 }): string {
-  if (input.stageLabel.trim().toLowerCase() === "latest") {
+  // HD builds show one product name; only development keeps a stage suffix.
+  if (input.stageLabel.trim().toLowerCase() !== "dev") {
     return input.baseName;
   }
 
