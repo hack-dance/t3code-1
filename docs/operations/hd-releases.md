@@ -63,6 +63,10 @@ gh workflow run hd-release.yml --repo hack-dance/t3code-1 --ref hd/nightly \
   -f mode=candidate -f source=head -f upstream_channel=nightly -f targets=pilot
 ```
 
+Add `-f expected_sha=<full sha>` to make the run stop before building anything
+if `hd/nightly` moved to a different commit between your push and the dispatch.
+The automatic sync always passes it.
+
 Follow the run in Actions. Its summary and `hd-release-metadata` artifact record
 the source, upstream tag and commit, maintenance commit, and version (plus, for
 `replay`, the replayed patches and candidate commit). Replay candidate branches are

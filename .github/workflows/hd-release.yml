@@ -26,6 +26,9 @@ on:
         type: choice
         default: pilot
         options: [pilot, all]
+      expected_sha:
+        description: "Optional full commit SHA the run must build. The run stops if the dispatched ref resolved to another commit."
+        type: string
   schedule:
     - cron: "23 */6 * * *"
 
@@ -74,6 +77,16 @@ jobs:
         run: |
           echo "mode=${REQUESTED_MODE:-check}" >> "$GITHUB_OUTPUT"
           echo "source=${REQUESTED_SOURCE:-head}" >> "$GITHUB_OUTPUT"
+      - name: Require the expected commit
+        if: inputs.expected_sha != ''
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          ACTUAL_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+            echo "::error::Dispatched for $EXPECTED_SHA but the ref resolved to $ACTUAL_SHA. Nothing was built."
+            exit 1
+          fi
       - name: Require release configuration before publication
         if: steps.mode.outputs.mode == 'publish'
         env:
