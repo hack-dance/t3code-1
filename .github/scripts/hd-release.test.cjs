@@ -184,6 +184,44 @@ test("head selection skips missing tags and accepts the release commit itself", 
   );
 });
 
+test("a failed preparation still records its inputs", (t) => {
+  const f = fixture(t);
+  f.git("checkout", "hd");
+  const bin = Path.join(Path.dirname(f.sourceDir), "bin");
+  Fs.mkdirSync(bin);
+  Fs.writeFileSync(Path.join(bin, "gh"), "#!/bin/sh\necho '[]'\n", { mode: 0o755 });
+  const run = ChildProcess.spawnSync(process.execPath, [Path.join(__dirname, "hd-release.cjs")], {
+    cwd: f.sourceDir,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${bin}${Path.delimiter}${process.env.PATH}`,
+      GITHUB_REPOSITORY: "hack-dance/t3code-1",
+      GITHUB_RUN_ID: "7",
+      HD_MODE: "publish",
+      HD_UPSTREAM_TAG: "v9.9.9-nightly.20261017.1",
+    },
+  });
+  Assert.equal(run.status, 1);
+  Assert.match(run.stderr, /No published upstream nightly release matching v9\.9\.9/);
+  const inputs = JSON.parse(Fs.readFileSync(Path.join(f.sourceDir, "hd-release.json"), "utf8"));
+  Assert.equal(inputs.sourceSha, f.sourceSha);
+  Assert.equal(inputs.source, "head");
+  Assert.equal(inputs.upstreamTag, "v9.9.9-nightly.20261017.1");
+});
+
+test("head selection names missing upstream tags", () => {
+  Assert.throws(
+    () =>
+      selectMergedRelease({
+        sourceDir: process.cwd(),
+        sourceSha: "b".repeat(40),
+        candidates: [{ tag: "v1.2.4-nightly.20261015.1", sha: null }],
+      }),
+    /Upstream has no tag for v1\.2\.4-nightly\.20261015\.1/,
+  );
+});
+
 test("pilot publication preserves all previously shipped HD architectures", () => {
   const prior = (...names) => [
     {

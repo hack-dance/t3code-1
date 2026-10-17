@@ -82,7 +82,13 @@ function selectMergedRelease({ sourceDir, sourceSha, candidates }) {
       // Not merged yet; try the next older release.
     }
   }
-  const names = candidates.map((candidate) => candidate.tag).join(", ") || "none";
+  const shown = candidates.slice(0, 5).map((candidate) => candidate.tag);
+  const names =
+    (shown.join(", ") || "none") +
+    (candidates.length > shown.length ? ` and ${candidates.length - shown.length} older` : "");
+  if (candidates.length > 0 && candidates.every((candidate) => !candidate.sha)) {
+    throw new Error(`Upstream has no tag for ${names}.`);
+  }
   throw new Error(
     `The maintenance commit ${sourceSha} contains none of the upstream releases (${names}). Merge upstream into hd/nightly first.`,
   );
@@ -164,10 +170,22 @@ function main() {
   if (!["head", "replay"].includes(source)) throw new Error("Unknown HD source.");
   if (process.env.HD_UPSTREAM_TAG && !/^v[\w.-]+$/.test(process.env.HD_UPSTREAM_TAG))
     throw new Error("Invalid upstream tag.");
+  const sourceSha = exec("git", ["rev-parse", "HEAD"]);
+  // Record the inputs first, so every failed preparation still uploads metadata that lets an
+  // agent reproduce it without relying on whichever upstream release is newest later.
+  const inputs = {
+    sourceSha,
+    mode,
+    source,
+    targets,
+    channel,
+    upstreamTag: process.env.HD_UPSTREAM_TAG || null,
+    repository: config.repository,
+  };
+  Fs.writeFileSync("hd-release.json", JSON.stringify(inputs, null, 2) + "\n");
   const releases = JSON.parse(
     exec("gh", ["api", "--paginate", "--slurp", `repos/${config.upstream}/releases?per_page=100`]),
   ).flat();
-  const sourceSha = exec("git", ["rev-parse", "HEAD"]);
   let release = selectRelease(releases, channel, process.env.HD_UPSTREAM_TAG);
   let commit;
   if (source === "head" && mode !== "check") {
@@ -191,21 +209,7 @@ function main() {
         return null; // A release whose tag is missing upstream cannot be the merged base.
       }
     });
-    let merged;
-    try {
-      merged = selectMergedRelease({ sourceDir: process.cwd(), sourceSha, candidates });
-    } catch (error) {
-      // Keep the inputs for the failed run, as the replay path does.
-      Fs.writeFileSync(
-        "hd-release.json",
-        JSON.stringify(
-          { sourceSha, mode, source, targets, upstreamTag: process.env.HD_UPSTREAM_TAG || null },
-          null,
-          2,
-        ) + "\n",
-      );
-      throw error;
-    }
+    const merged = selectMergedRelease({ sourceDir: process.cwd(), sourceSha, candidates });
     release = merged.release;
     commit = { sha: merged.sha };
   } else {
@@ -235,8 +239,7 @@ function main() {
     targets,
     repository: config.repository,
   };
-  // Keep the pinned inputs even when replay fails, so an agent can reproduce
-  // the conflict without relying on whichever upstream release is newest later.
+  // The resolved release replaces the inputs record before the replay can fail.
   Fs.writeFileSync("hd-release.json", JSON.stringify(metadata, null, 2) + "\n");
   if (process.env.GITHUB_STEP_SUMMARY) {
     Fs.appendFileSync(
