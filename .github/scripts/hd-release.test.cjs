@@ -6,6 +6,7 @@ const Path = require("node:path");
 const { test } = require("node:test");
 const {
   selectRelease,
+  selectMergedRelease,
   releaseVersion,
   prepareCandidate,
   assertPublishCoverage,
@@ -115,6 +116,37 @@ test("stops on a conflict with the patch and paths available for agent review", 
   );
   Assert.equal(f.git("rev-parse", "HEAD"), f.sourceSha);
   Assert.equal(Fs.readFileSync(Path.join(f.sourceDir, "fix.txt"), "utf8"), "fix\n");
+});
+
+test("head builds use the newest upstream release already merged into maintenance", (t) => {
+  const f = fixture(t);
+  const older = f.commit("upstream.txt", "one\n", "upstream one");
+  const newer = f.commit("upstream.txt", "two\n", "upstream two");
+  f.git("checkout", "hd");
+  f.git("-c", "commit.gpgsign=false", "merge", "--no-ff", "--no-edit", older);
+  const sourceSha = f.git("rev-parse", "HEAD");
+  const candidates = [
+    { tag: "v1.2.4-nightly.20261016.2", sha: newer },
+    { tag: "v1.2.4-nightly.20261015.1", sha: older },
+  ];
+  Assert.equal(
+    selectMergedRelease({ sourceDir: f.sourceDir, sourceSha, candidates }).tag,
+    "v1.2.4-nightly.20261015.1",
+  );
+  Assert.throws(
+    () => selectMergedRelease({ sourceDir: f.sourceDir, sourceSha, candidates: [candidates[0]] }),
+    /contains none of the upstream releases \(v1\.2\.4-nightly\.20261016\.2\)/,
+  );
+  Assert.throws(
+    () =>
+      selectMergedRelease({
+        sourceDir: f.sourceDir,
+        sourceSha,
+        candidates: [{ tag: "v1", sha: "not-a-sha; rm -rf /" }],
+      }),
+    /contains none/,
+  );
+  Assert.equal(f.git("rev-parse", "HEAD"), sourceSha);
 });
 
 test("pilot publication preserves all previously shipped HD architectures", () => {

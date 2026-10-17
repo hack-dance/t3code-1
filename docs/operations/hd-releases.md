@@ -1,20 +1,47 @@
 # Hack Dance releases
 
-HD builds carry the selected local fixes on top of a published upstream release.
-`main` mirrors upstream. Keep contribution fixes on their own branches and HD
+HD builds are `hd/nightly`: upstream merged in, with the HD fixes on top. `main`
+mirrors upstream. Keep contribution fixes on their own branches and HD
 maintenance commits on `hd/nightly`. The SSH fix branch does not contain this
 release setup.
+
+## Automatic upstream sync
+
+A fleet job (`computer t3 fork-sync` in `roodboi/machine`, scheduled daily on the
+M3) keeps `hd/nightly` current. When upstream publishes a newer Nightly, it merges
+that release tag into `hd/nightly` with a merge commit (never a rebase), has Codex
+resolve conflicts in favor of the HD fixes, runs typecheck, lint and the HD test
+set, and gets independent Codex and Claude reviews. Only when both approve does it
+push `hd/nightly` (fast-forward, never forced) from the fleet machine and dispatch
+`publish` with `source=head` for the merged tag. It stops and reports on conflicts
+it cannot resolve, failing checks, or a missing approval. Upstream workflow-file
+changes arrive through that normal push, so Actions never writes workflows.
+
+## Running the workflow
 
 Use **Actions → HD: Sync and release → Run workflow** in `hack-dance/t3code-1`.
 Select `hd/nightly`, choose upstream `nightly` or `stable`, and optionally pin an
 exact upstream release tag. Both upstream bases ship on the HD Nightly train.
 
+`source` decides what is built:
+
+- `head` (default) builds the pushed commit as-is. The upstream base is the pinned
+  tag, or else the newest published upstream release already in the commit's
+  history; the run fails if the commit contains none of them. Nothing is pushed.
+- `replay` is the older flow: it replays the HD commits above
+  `.github/hd-release.json`'s `overlayBase` onto the selected upstream release and
+  pushes an `hd/candidate/*` branch with the workflow token. It only works while
+  that overlay is linear, so it stops once `hd/nightly` contains an upstream merge,
+  and the push fails whenever upstream changed a workflow file.
+
+Modes:
+
 - `check` reports the newest published upstream release without building or
   changing branches. Scheduled runs do this every six hours.
-- `candidate` replays HD commits, runs checks, and uploads test builds as workflow
-  artifacts. `pilot` builds macOS arm64 and Linux x64; `all` also builds macOS x64,
-  Linux arm64, and both Windows architectures. Candidates use preview versions
-  and have no update feed. Test them with an isolated profile and copied state.
+- `candidate` runs checks and uploads test builds as workflow artifacts. `pilot`
+  builds macOS arm64 and Linux x64; `all` also builds macOS x64, Linux arm64, and
+  both Windows architectures. Candidates use preview versions and have no update
+  feed. Test them with an isolated profile and copied state.
 - `publish` requires signing configuration for the selected targets and the repository
   variable `HD_RELEASE_ENABLED=true`. It stages all assets in a draft release,
   then publishes it. A pilot publishes macOS arm64 and Linux x64. After HD has
@@ -32,19 +59,18 @@ For an agent or terminal, the same candidate operation is:
 
 ```sh
 gh workflow run hd-release.yml --repo hack-dance/t3code-1 --ref hd/nightly \
-  -f mode=candidate -f upstream_channel=nightly -f targets=pilot
+  -f mode=candidate -f source=head -f upstream_channel=nightly -f targets=pilot
 ```
 
 Follow the run in Actions. Its summary and `hd-release-metadata` artifact record
-the upstream tag and commit, maintenance commit, replayed patches, candidate
-commit, and version. Candidate branches are unique to each run; they never
-overwrite the maintenance branch or contribution branches.
+the source, upstream tag and commit, maintenance commit, and version (plus, for
+`replay`, the replayed patches and candidate commit). Replay candidate branches are
+unique to each run; they never overwrite the maintenance branch or contribution
+branches.
 
-If a patch conflicts, the preparation job identifies the patch and paths. Fix
-the patch against the selected upstream base on the maintenance branch, then
-retry. Do not bypass checks to publish. `.github/hd-release.json` records the
-common ancestor below the HD overlay; changing it changes which commits replay.
-Keep the overlay linear. Equivalent fixes already present upstream are skipped.
+To merge upstream by hand, merge the release tag into `hd/nightly`
+(`git merge --no-ff <tag>`), keep the HD behavior when resolving conflicts, run the
+checks, and push without force. Do not bypass checks to publish.
 
 ## Signing and first installation
 

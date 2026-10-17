@@ -4,14 +4,20 @@ const Path = require("node:path");
 
 const config = require("../hd-release.json");
 
-function selectRelease(releases, channel, tag) {
+/** Published upstream releases of a channel, newest first. */
+function channelReleases(releases, channel) {
   if (!["nightly", "stable"].includes(channel)) throw new Error("Unknown upstream channel.");
   const pattern =
     channel === "nightly" ? /^v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+$/ : /^v\d+\.\d+\.\d+$/;
-  const release = releases
+  return releases
     .filter((item) => !item.draft && item.published_at && pattern.test(item.tag_name))
-    .filter((item) => !tag || item.tag_name === tag)
-    .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))[0];
+    .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at));
+}
+
+function selectRelease(releases, channel, tag) {
+  const release = channelReleases(releases, channel).filter(
+    (item) => !tag || item.tag_name === tag,
+  )[0];
   if (!release)
     throw new Error(`No published upstream ${channel} release${tag ? ` matching ${tag}` : ""}.`);
   return release;
@@ -46,6 +52,27 @@ function assertPublishCoverage(releases, targets) {
       "HD has shipped additional architectures; publish all targets to preserve their updates.",
     );
   }
+}
+
+/**
+ * Head source: the maintenance branch already merged upstream, so build it as pushed.
+ * Returns the newest candidate release whose commit is in the maintenance history.
+ * `candidates` are newest first; each carries the tag and its resolved commit.
+ */
+function selectMergedRelease({ sourceDir, sourceSha, candidates }) {
+  for (const candidate of candidates) {
+    if (!candidate.sha || !/^[a-f0-9]{40}$/.test(candidate.sha)) continue;
+    try {
+      exec("git", ["merge-base", "--is-ancestor", candidate.sha, sourceSha], sourceDir);
+      return candidate;
+    } catch {
+      // Not merged yet; try the next older release.
+    }
+  }
+  const names = candidates.map((candidate) => candidate.tag).join(", ") || "none";
+  throw new Error(
+    `The maintenance commit ${sourceSha} contains none of the upstream releases (${names}). Merge upstream into hd/nightly first.`,
+  );
 }
 
 function exec(command, args, cwd) {
@@ -120,13 +147,48 @@ function main() {
   const targets = process.env.HD_TARGETS || "pilot";
   if (process.env.GITHUB_REPOSITORY !== config.repository)
     throw new Error("HD workflow is fork-only.");
+  const source = process.env.HD_SOURCE || "head";
+  if (!["head", "replay"].includes(source)) throw new Error("Unknown HD source.");
   const releases = JSON.parse(
     exec("gh", ["api", "--paginate", "--slurp", `repos/${config.upstream}/releases?per_page=100`]),
   ).flat();
-  const release = selectRelease(releases, channel, process.env.HD_UPSTREAM_TAG);
-  const commit = JSON.parse(
-    exec("gh", ["api", `repos/${config.upstream}/commits/${release.tag_name}`]),
-  );
+  const sourceSha = exec("git", ["rev-parse", "HEAD"]);
+  let release = selectRelease(releases, channel, process.env.HD_UPSTREAM_TAG);
+  let commit;
+  if (source === "head" && mode !== "check") {
+    // Build exactly what was pushed. The upstream base is the newest published release
+    // (or the pinned one) that the maintenance history already contains.
+    exec("git", [
+      "fetch",
+      "--no-tags",
+      `https://github.com/${config.upstream}.git`,
+      "+refs/tags/*:refs/hd-upstream/tags/*",
+    ]);
+    const ordered = process.env.HD_UPSTREAM_TAG
+      ? [release]
+      : channelReleases(releases, channel).slice(0, 50);
+    const candidates = ordered.map((item) => {
+      let sha = null;
+      try {
+        sha = exec("git", [
+          "rev-parse",
+          "--verify",
+          "--quiet",
+          `refs/hd-upstream/tags/${item.tag_name}^{commit}`,
+        ]);
+      } catch {
+        // A release whose tag is missing upstream cannot be the merged base.
+      }
+      return { tag: item.tag_name, sha, release: item };
+    });
+    const merged = selectMergedRelease({ sourceDir: process.cwd(), sourceSha, candidates });
+    release = merged.release;
+    commit = { sha: merged.sha };
+  } else {
+    commit = JSON.parse(
+      exec("gh", ["api", `repos/${config.upstream}/commits/${release.tag_name}`]),
+    );
+  }
   if (mode === "publish") {
     const prior = JSON.parse(
       exec("gh", [
@@ -138,7 +200,6 @@ function main() {
     ).flat();
     assertPublishCoverage(prior, targets);
   }
-  const sourceSha = exec("git", ["rev-parse", "HEAD"]);
   const version = releaseVersion(release.tag_name, process.env.GITHUB_RUN_ID, mode);
   const metadata = {
     upstreamTag: release.tag_name,
@@ -146,6 +207,7 @@ function main() {
     sourceSha,
     version,
     mode,
+    source,
     targets,
     repository: config.repository,
   };
@@ -155,10 +217,10 @@ function main() {
   if (process.env.GITHUB_STEP_SUMMARY) {
     Fs.appendFileSync(
       process.env.GITHUB_STEP_SUMMARY,
-      `## HD ${mode}\n\nUpstream: ${release.tag_name} (${commit.sha})\n\nMaintenance: ${sourceSha}\n\nVersion: ${version}\n`,
+      `## HD ${mode} (${source})\n\nUpstream: ${release.tag_name} (${commit.sha})\n\nMaintenance: ${sourceSha}\n\nVersion: ${version}\n`,
     );
   }
-  if (mode !== "check") {
+  if (mode !== "check" && source === "replay") {
     exec("git", ["fetch", "--no-tags", `https://github.com/${config.upstream}.git`, commit.sha]);
     const candidateDir = Path.join(process.env.RUNNER_TEMP, "hd-candidate");
     try {
@@ -207,7 +269,13 @@ function main() {
   }
 }
 
-module.exports = { selectRelease, releaseVersion, prepareCandidate, assertPublishCoverage };
+module.exports = {
+  selectRelease,
+  selectMergedRelease,
+  releaseVersion,
+  prepareCandidate,
+  assertPublishCoverage,
+};
 if (require.main === module) {
   try {
     main();

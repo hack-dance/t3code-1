@@ -8,6 +8,11 @@ on:
         type: choice
         default: candidate
         options: [check, candidate, publish]
+      source:
+        description: "head builds the pushed hd/nightly commit (upstream already merged). replay is the legacy patch replay; it needs a linear overlay."
+        type: choice
+        default: head
+        options: [head, replay]
       upstream_channel:
         description: "Published upstream release to use as the base"
         type: choice
@@ -44,6 +49,7 @@ jobs:
       channel: ${{ steps.prepare.outputs.channel }}
       ref: ${{ steps.prepare.outputs.ref }}
       mode: ${{ steps.mode.outputs.mode }}
+      source: ${{ steps.mode.outputs.source }}
     steps:
       # checkout's credential cleanup traverses orphaned vendored gitlinks,
       # even with submodules disabled. Public checkouts need no credentials.
@@ -64,7 +70,10 @@ jobs:
         id: mode
         env:
           REQUESTED_MODE: ${{ inputs.mode }}
-        run: echo "mode=${REQUESTED_MODE:-check}" >> "$GITHUB_OUTPUT"
+          REQUESTED_SOURCE: ${{ inputs.source }}
+        run: |
+          echo "mode=${REQUESTED_MODE:-check}" >> "$GITHUB_OUTPUT"
+          echo "source=${REQUESTED_SOURCE:-head}" >> "$GITHUB_OUTPUT"
       - name: Require release configuration before publication
         if: steps.mode.outputs.mode == 'publish'
         env:
@@ -105,16 +114,19 @@ jobs:
           done
       - name: Test candidate preparation
         run: node --test .github/scripts/hd-release.test.cjs
+      # Only the legacy replay pushes a candidate branch. Head builds push nothing, so
+      # upstream workflow-file changes never need a token that can write workflows.
       - name: Configure fork push authentication
-        if: steps.mode.outputs.mode != 'check'
+        if: steps.mode.outputs.mode != 'check' && steps.mode.outputs.source == 'replay'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh auth setup-git
-      - name: Resolve upstream and replay HD patches
+      - name: Resolve upstream and prepare the HD source
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
           HD_MODE: ${{ steps.mode.outputs.mode }}
+          HD_SOURCE: ${{ steps.mode.outputs.source }}
           HD_UPSTREAM_CHANNEL: ${{ inputs.upstream_channel || 'nightly' }}
           HD_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
           HD_TARGETS: ${{ inputs.targets || 'pilot' }}
@@ -368,7 +380,7 @@ jobs:
           archives=(t3-*.tar.gz t3-*.zip)
           (( ${#archives[@]} > 0 ))
           sha256sum "${archives[@]}" > SHA256SUMS
-          node -e 'const fs = require("node:fs"); const m = JSON.parse(fs.readFileSync("hd-release.json")); fs.writeFileSync("../hd-release-notes.md", `HD Nightly ${m.version}\n\nUpstream: ${m.upstreamTag} (${m.upstreamSha})\n\nMaintenance: ${m.sourceSha}\n\nCandidate: ${m.candidateSha}\n\nOverlay commits: ${m.overlayCommits.join(", ")}\n\nHosted web and mobile are distributed separately.\n`);'
+          node -e 'const fs = require("node:fs"); const m = JSON.parse(fs.readFileSync("hd-release.json")); const parts = [`HD Nightly ${m.version}`, `Upstream: ${m.upstreamTag} (${m.upstreamSha})`, `Maintenance: ${m.sourceSha}`]; if (m.candidateSha) parts.push(`Candidate: ${m.candidateSha}`, `Overlay commits: ${(m.overlayCommits || []).join(", ")}`); parts.push("Hosted web and mobile are distributed separately."); fs.writeFileSync("../hd-release-notes.md", parts.join("\n\n") + "\n");'
       - name: Publish complete release from a draft
         env:
           GH_TOKEN: ${{ github.token }}
