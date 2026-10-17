@@ -61,9 +61,11 @@ unchanged from upstream.
 
 HD builds are branded **Hack the Planet** with the HACK globe icon on every
 update channel. The name lives in `packages/shared/src/hdBranding.ts`; the icon
-set lives in `assets/hd` (see `assets/README.md`). The rebrand is display-only:
-the bundle ID, package names, executable names, release asset names, `t3code://`
-URL schemes, state directories, and the Electron runtime name stay as they were.
+set lives in `assets/hd` (see `assets/README.md`). The bundle ID, package names,
+release asset names, `t3code://` URL schemes, state directories, and the Electron
+runtime name stay as they were. The product name does rename the macOS
+executable and app folder, the Windows exe, and the Linux deb `/opt` directory;
+see the install-path notes below.
 The runtime name keys macOS Keychain and Linux secret-store entries, so renaming
 it would orphan stored credentials. Keychain prompts therefore still name
 "T3 Code Nightly".

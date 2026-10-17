@@ -2661,9 +2661,11 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
   return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
 }
 
-// User-visible bundle name (CFBundleName, Linux desktop entry, Windows file
-// description). The bundle ID, executable names, and URL schemes are unchanged
-// so existing installs upgrade in place.
+// User-visible product name (CFBundleName/CFBundleDisplayName, Linux desktop
+// entry, Windows file description). electron-builder also derives the macOS
+// executable and .app folder, the Windows exe, and the deb /opt directory from
+// it, so those are renamed (see docs/operations/hd-releases.md). The bundle ID
+// and URL schemes are unchanged so existing installs upgrade in place.
 export function resolveDesktopProductName(_version: string): string {
   return HD_PRODUCT_NAME;
 }
