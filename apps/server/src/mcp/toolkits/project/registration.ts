@@ -126,6 +126,20 @@ export const vetProjectRegistration = Effect.fn("mcp.vetProjectRegistration")(fu
 });
 
 /**
+ * The last check before the project is written: the vetted folder must still
+ * canonicalise to itself and pass the guards, so a swap during vetting is
+ * refused before anything is published.
+ */
+export const recheckProjectRegistration = Effect.fn("mcp.recheckProjectRegistration")(function* <
+  P extends CreateParams,
+>(vetted: P) {
+  const root = vetted.workspaceRoot;
+  const now = root === undefined ? undefined : yield* vetWorkspaceRoot(root);
+  if (now === undefined || now !== root)
+    return yield* needsFullAccess("workspaceRoot changed while it was being registered.");
+});
+
+/**
  * Re-vets what was registered below full access. The folder can be swapped
  * (say for a symlink to ~/.ssh) between vetting and creation; if the stored
  * root no longer canonicalises to the vetted folder, the project is deleted
@@ -140,10 +154,22 @@ export const confirmProjectRegistration = Effect.fn("mcp.confirmProjectRegistrat
   );
   if (now !== undefined && now === vetted.workspaceRoot && now === created.workspaceRoot)
     return created;
+  // Best effort: the recheck already ran just before the write, so reaching
+  // here means a swap in the moment between it and the service's own stat. A
+  // non-forced delete never removes threads someone attached meanwhile; if it
+  // fails, the leftover is logged so it can be found.
   const projects = yield* Project.ProjectService;
-  yield* projects
-    .delete({ projectId: created.id, commandId: yield* newCommandId() })
-    .pipe(Effect.mapError(unavailable));
+  const commandId = yield* newCommandId();
+  yield* projects.delete({ projectId: created.id, commandId }).pipe(
+    Effect.tapError((error) =>
+      Effect.logWarning("could not undo a project registration whose folder changed", {
+        projectId: created.id,
+        workspaceRoot: created.workspaceRoot,
+        error: error._tag,
+      }),
+    ),
+    Effect.mapError(unavailable),
+  );
   yield* Effect.logWarning("undid a project registration whose folder changed", {
     projectId: created.id,
     workspaceRoot: created.workspaceRoot,

@@ -513,6 +513,9 @@ const registrationHarness = (input: {
   readonly registered: Array<string>;
   readonly deleted?: Array<string>;
   readonly onCreate?: Effect.Effect<void>;
+  readonly onSnapshot?: Effect.Effect<void>;
+  /** Run the call from a T3 thread whose shell reads as these, in turn (the last repeats). */
+  readonly threadShells?: Array<OrchestrationV2ThreadShell>;
 }) =>
   Layer.mergeAll(
     ServerSettings.layerTest(),
@@ -520,22 +523,40 @@ const registrationHarness = (input: {
     Layer.succeed(McpInvocationContext.McpInvocationContext, {
       environmentId: EnvironmentId.make("environment"),
       requestNamespace: "client:session-1",
-      thread: undefined,
-      client: { sessionId: "session-1", label: "machine-agent-run", access: input.access },
+      thread:
+        input.threadShells === undefined
+          ? undefined
+          : {
+              threadId: ThreadId.make("registering-thread"),
+              providerSessionId: "session",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+            },
+      client:
+        input.threadShells === undefined
+          ? { sessionId: "session-1", label: "machine-agent-run", access: input.access }
+          : undefined,
       issuedAt: 0,
       capabilities: new Set(["orchestration" as const]),
     }),
     Layer.succeed(HostProcess.HomeDirectory, input.home),
-    Layer.mock(ThreadManagement.ThreadManagementService)({}),
+    Layer.mock(ThreadManagement.ThreadManagementService)({
+      getThreadShell: () =>
+        Effect.sync(() => {
+          const shells = input.threadShells ?? [];
+          return (shells.length > 1 ? shells.shift() : shells[0]) ?? null;
+        }),
+    }),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
     Layer.mock(Project.ProjectService)({
-      snapshot: Effect.succeed({
-        projects: (input.existing ?? []).map((workspaceRoot, index) => ({
-          id: ProjectId.make(`project:existing-${index}`),
-          workspaceRoot,
-          deletedAt: null,
-        })),
-      } as unknown as Effect.Success<Project.ProjectService["Service"]["snapshot"]>),
+      snapshot: (input.onSnapshot ?? Effect.void).pipe(
+        Effect.as({
+          projects: (input.existing ?? []).map((workspaceRoot, index) => ({
+            id: ProjectId.make(`project:existing-${index}`),
+            workspaceRoot,
+            deletedAt: null,
+          })),
+        } as unknown as Effect.Success<Project.ProjectService["Service"]["snapshot"]>),
+      ),
       delete: (remove) =>
         Effect.sync(() => {
           input.deleted?.push(remove.projectId);
@@ -716,4 +737,92 @@ it.effect("a client below full access registers an existing folder under home, a
     yield* run("full-access", { title: "Outside", workspaceRoot: outside }, full);
     expect(full).toEqual([outside]);
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect(
+  "a below-full-access registration is refused when the caller or the folder changes during vetting",
+  () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-register-race-" });
+      const home = path.join(root, "home");
+      const repo = path.join(home, "dev", "repo");
+      const hidden = path.join(home, ".ssh");
+      yield* fileSystem.makeDirectory(repo, { recursive: true });
+      yield* fileSystem.makeDirectory(hidden, { recursive: true });
+
+      const create = (
+        harness: Parameters<typeof registrationHarness>[0],
+        workspaceRoot: string,
+      ) => {
+        const dependencies = registrationHarness(harness);
+        return ProjectToolkit.pipe(
+          Effect.provide(
+            McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+              Layer.provide(dependencies),
+            ),
+          ),
+          Effect.flatMap((built) =>
+            built
+              .handle("t3_project_create", { title: "Repo", workspaceRoot })
+              .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies)),
+          ),
+          Effect.map((chunks) => chunks.at(-1)?.result),
+        );
+      };
+      const shell = (changes: Partial<OrchestrationV2ThreadShell>) =>
+        ({
+          id: ThreadId.make("registering-thread"),
+          projectId: ProjectId.make("project:host"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "auto",
+          interactionMode: "default",
+          activeRunId: "active-run",
+          archivedAt: null,
+          deletedAt: null,
+          ...changes,
+        }) as OrchestrationV2ThreadShell;
+
+      const liveRegistered: Array<string> = [];
+      expect(
+        yield* create(
+          { access: "auto", home, registered: liveRegistered, threadShells: [shell({})] },
+          repo,
+        ),
+      ).toMatchObject({ workspaceRoot: yield* fileSystem.realPath(repo) });
+      expect(liveRegistered).toHaveLength(1);
+
+      for (const [later, code] of [
+        [shell({ interactionMode: "plan" }), "capability_denied"],
+        [shell({ activeRunId: null }), "parent_not_active"],
+      ] as const) {
+        const registered: Array<string> = [];
+        const result = yield* create(
+          { access: "auto", home, registered, threadShells: [shell({}), later] },
+          repo,
+        );
+        expect(result).toMatchObject({ code });
+        expect(registered).toEqual([]);
+      }
+
+      // Swapped for a symlink to a hidden folder while vetting: refused before the write.
+      const registered: Array<string> = [];
+      const deleted: Array<string> = [];
+      const result = yield* create(
+        {
+          access: "auto",
+          home,
+          registered,
+          deleted,
+          onSnapshot: fileSystem
+            .remove(repo, { recursive: true })
+            .pipe(Effect.andThen(fileSystem.symlink(hidden, repo)), Effect.orDie),
+        },
+        repo,
+      );
+      expect(result).toMatchObject({ code: "capability_denied" });
+      expect(registered).toEqual([]);
+      expect(deleted).toEqual([]);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );

@@ -215,10 +215,13 @@ export const writesEnvironment = <P, A, E, R>(
 /**
  * Like `writesEnvironment`, but a caller below full access may also make the
  * write when `vet` approves these params; what `vet` returns is what the
- * handler gets, so it can also canonicalise them. After the handler succeeds
- * on that path, `confirm` can verify the outcome and undo it. Read-only
- * clients, callers without a live run and plan-mode callers are refused as
- * before, and full-access callers skip both `vet` and `confirm`.
+ * handler gets, so it can also canonicalise them. Below full access the
+ * caller is re-checked after `vet` (it may have ended its run or entered plan
+ * mode meanwhile), `recheck` then re-validates the vetted params as the last
+ * step before the write, and `confirm` can verify the outcome and undo it.
+ * Read-only clients, callers without a live run and plan-mode callers are
+ * refused as before, and full-access callers skip `vet`, `recheck` and
+ * `confirm`.
  *
  * Below full access, the handler's `check` re-checks the caller (live, not
  * read-only, default interaction mode) but does not re-run `vet`.
@@ -226,6 +229,7 @@ export const writesEnvironment = <P, A, E, R>(
 export const writesEnvironmentWhen = <P, A, E, R, RV, RC>(
   belowFullAccess: {
     readonly vet: (params: P, caller: Caller) => Effect.Effect<P, OrchestratorMcpFailure, RV>;
+    readonly recheck?: (vetted: P) => Effect.Effect<void, OrchestratorMcpFailure, RV>;
     readonly confirm?: (vetted: P, result: A) => Effect.Effect<A, OrchestratorMcpFailure, RC>;
   },
   handle: (
@@ -250,6 +254,8 @@ export const writesEnvironmentWhen = <P, A, E, R, RV, RC>(
       const caller = yield* defaultModeCheck;
       if (isFullAccess(caller)) return yield* handle(params, fullAccessCheck);
       const vetted = yield* belowFullAccess.vet(params, caller);
+      yield* defaultModeCheck;
+      if (belowFullAccess.recheck !== undefined) yield* belowFullAccess.recheck(vetted);
       const result = yield* handle(vetted, defaultModeCheck);
       return belowFullAccess.confirm === undefined
         ? result

@@ -11,7 +11,11 @@ import * as Repositories from "../../../sourceControl/SourceControlRepositorySer
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
-import { confirmProjectRegistration, vetProjectRegistration } from "./registration.ts";
+import {
+  confirmProjectRegistration,
+  recheckProjectRegistration,
+  vetProjectRegistration,
+} from "./registration.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 function projectFailure(error: Project.ProjectServiceError) {
@@ -209,7 +213,11 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   // vetProjectRegistration says what still needs it, and confirmProjectRegistration
   // undoes a registration whose folder was swapped meanwhile.
   t3_project_create: McpToolAccess.writesEnvironmentWhen(
-    { vet: vetProjectRegistration, confirm: confirmProjectRegistration },
+    {
+      vet: vetProjectRegistration,
+      recheck: recheckProjectRegistration,
+      confirm: confirmProjectRegistration,
+    },
     ({ workspaceRoot, ...input }) =>
       Effect.gen(function* () {
         const projects = yield* Project.ProjectService;
