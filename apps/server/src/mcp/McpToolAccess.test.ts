@@ -125,6 +125,14 @@ const ProbeToolkit = Toolkit.make(
     }),
   }),
   Tool.make("writes_environment", probe),
+  Tool.make("writes_environment_when", {
+    ...probe,
+    parameters: Schema.Struct({
+      refuse: Schema.optional(Schema.Boolean),
+      vetted: Schema.optional(Schema.Boolean),
+      undo: Schema.optional(Schema.Boolean),
+    }),
+  }),
 );
 const ran = Effect.succeed({ ran: "ran" });
 const probeHandlers: McpToolAccess.Handlers<typeof ProbeToolkit.tools> = {
@@ -142,6 +150,19 @@ const probeHandlers: McpToolAccess.Handlers<typeof ProbeToolkit.tools> = {
     (_, modes) => Effect.succeed({ ran: `${modes.runtimeMode}/${modes.interactionMode}` }),
   ),
   writes_environment: McpToolAccess.writesEnvironment(() => ran),
+  writes_environment_when: McpToolAccess.writesEnvironmentWhen(
+    {
+      vet: (params) =>
+        params.refuse === true
+          ? Effect.fail(new OrchestratorMcpFailure({ code: "invalid_request", message: "vetoed" }))
+          : Effect.succeed({ ...params, vetted: true }),
+      confirm: (params, result) =>
+        params.undo === true
+          ? Effect.fail(new OrchestratorMcpFailure({ code: "invalid_request", message: "undone" }))
+          : Effect.succeed({ ran: `${result.ran}/confirmed` }),
+    },
+    (params) => Effect.succeed({ ran: params.vetted === true ? "vetted" : "ran" }),
+  ),
 };
 const layerProbeHandlers = McpToolAccess.toLayer(ProbeToolkit, probeHandlers);
 
@@ -181,6 +202,7 @@ export const refusedAtCompileTime = () => {
       writes_threads: unchecked,
       starts_threads: unchecked,
       writes_environment: unchecked,
+      writes_environment_when: unchecked,
     }),
   );
 };
@@ -298,6 +320,17 @@ it.effect.each([
   ["writes_environment", plan, {}, "capability_denied"],
   ["writes_environment", fullAccessClient, {}, "ran"],
   ["writes_environment", supervisedClient, {}, "capability_denied"],
+
+  ["writes_environment_when", readOnlyClient, {}, "capability_denied"],
+  ["writes_environment_when", previewOnly, {}, "capability_denied"],
+  ["writes_environment_when", ended, {}, "parent_not_active"],
+  ["writes_environment_when", plan, {}, "capability_denied"],
+  ["writes_environment_when", supervised, {}, "vetted/confirmed"],
+  ["writes_environment_when", supervised, { refuse: true }, "invalid_request"],
+  ["writes_environment_when", supervised, { undo: true }, "invalid_request"],
+  ["writes_environment_when", supervisedClient, {}, "vetted/confirmed"],
+  ["writes_environment_when", fullAccess, { refuse: true, undo: true }, "ran"],
+  ["writes_environment_when", fullAccessClient, { refuse: true, undo: true }, "ran"],
 ] as const)("%s from %o with %o: %s", ([tool, scope, args, expected]) =>
   call(tool, scope, args).pipe(
     Effect.map((outcome) => expect(outcome).toBe(expected)),

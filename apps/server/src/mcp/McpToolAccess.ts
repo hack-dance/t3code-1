@@ -214,13 +214,20 @@ export const writesEnvironment = <P, A, E, R>(
 
 /**
  * Like `writesEnvironment`, but a caller below full access may also make the
- * write when `belowFullAccess` vets these params; what it returns is what the
- * handler gets, so the vetting can also canonicalise them. Read-only clients,
- * callers without a live run and plan-mode callers are refused as before, and
- * full-access callers skip the vetting.
+ * write when `vet` approves these params; what `vet` returns is what the
+ * handler gets, so it can also canonicalise them. After the handler succeeds
+ * on that path, `confirm` can verify the outcome and undo it. Read-only
+ * clients, callers without a live run and plan-mode callers are refused as
+ * before, and full-access callers skip both `vet` and `confirm`.
+ *
+ * Below full access, the handler's `check` re-checks the caller (live, not
+ * read-only, default interaction mode) but does not re-run `vet`.
  */
-export const writesEnvironmentWhen = <P, A, E, R, RV>(
-  belowFullAccess: (params: P, caller: Caller) => Effect.Effect<P, OrchestratorMcpFailure, RV>,
+export const writesEnvironmentWhen = <P, A, E, R, RV, RC>(
+  belowFullAccess: {
+    readonly vet: (params: P, caller: Caller) => Effect.Effect<P, OrchestratorMcpFailure, RV>;
+    readonly confirm?: (vetted: P, result: A) => Effect.Effect<A, OrchestratorMcpFailure, RC>;
+  },
   handle: (
     params: P,
     check: Effect.Effect<Caller, OrchestratorMcpFailure, CheckServices>,
@@ -229,18 +236,24 @@ export const writesEnvironmentWhen = <P, A, E, R, RV>(
   const fullAccessCheck = orchestratingCaller.pipe(
     Effect.tap((caller) => assertFullAccess(caller, fullAccessRequired)),
   );
+  const defaultModeCheck = orchestratingCaller.pipe(
+    Effect.tap((caller) =>
+      caller.limits.interactionMode === "default"
+        ? Effect.void
+        : Effect.fail(
+            new OrchestratorMcpFailure({ code: "capability_denied", message: fullAccessRequired }),
+          ),
+    ),
+  );
   return declare((params: P) =>
     Effect.gen(function* () {
-      const caller = yield* orchestratingCaller;
+      const caller = yield* defaultModeCheck;
       if (isFullAccess(caller)) return yield* handle(params, fullAccessCheck);
-      if (caller.limits.interactionMode !== "default") {
-        return yield* new OrchestratorMcpFailure({
-          code: "capability_denied",
-          message: fullAccessRequired,
-        });
-      }
-      const vetted = yield* belowFullAccess(params, caller);
-      return yield* handle(vetted, orchestratingCaller);
+      const vetted = yield* belowFullAccess.vet(params, caller);
+      const result = yield* handle(vetted, defaultModeCheck);
+      return belowFullAccess.confirm === undefined
+        ? result
+        : yield* belowFullAccess.confirm(vetted, result);
     }),
   );
 };

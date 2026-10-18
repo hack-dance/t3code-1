@@ -11,7 +11,7 @@ import * as Repositories from "../../../sourceControl/SourceControlRepositorySer
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
-import { vetProjectRegistration } from "./registration.ts";
+import { confirmProjectRegistration, vetProjectRegistration } from "./registration.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 function projectFailure(error: Project.ProjectServiceError) {
@@ -206,9 +206,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     }),
   ),
   // Registering an existing folder under home is allowed below full access;
-  // vetProjectRegistration says what still needs it.
+  // vetProjectRegistration says what still needs it, and confirmProjectRegistration
+  // undoes a registration whose folder was swapped meanwhile.
   t3_project_create: McpToolAccess.writesEnvironmentWhen(
-    vetProjectRegistration,
+    { vet: vetProjectRegistration, confirm: confirmProjectRegistration },
     ({ workspaceRoot, ...input }) =>
       Effect.gen(function* () {
         const projects = yield* Project.ProjectService;

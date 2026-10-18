@@ -15,6 +15,7 @@ import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -27,7 +28,6 @@ import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as ProjectHandlers from "./handlers.ts";
-import { ProjectRegistrationHome } from "./registration.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 it.effect("attributes a launched thread's first message to the calling thread", () =>
@@ -511,6 +511,8 @@ const registrationHarness = (input: {
   readonly home: string;
   readonly existing?: ReadonlyArray<string>;
   readonly registered: Array<string>;
+  readonly deleted?: Array<string>;
+  readonly onCreate?: Effect.Effect<void>;
 }) =>
   Layer.mergeAll(
     ServerSettings.layerTest(),
@@ -523,7 +525,7 @@ const registrationHarness = (input: {
       issuedAt: 0,
       capabilities: new Set(["orchestration" as const]),
     }),
-    Layer.succeed(ProjectRegistrationHome, input.home),
+    Layer.succeed(HostProcess.HomeDirectory, input.home),
     Layer.mock(ThreadManagement.ThreadManagementService)({}),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
     Layer.mock(Project.ProjectService)({
@@ -534,20 +536,29 @@ const registrationHarness = (input: {
           deletedAt: null,
         })),
       } as unknown as Effect.Success<Project.ProjectService["Service"]["snapshot"]>),
-      create: (create) =>
+      delete: (remove) =>
         Effect.sync(() => {
-          input.registered.push(create.workspaceRoot);
-          return {
-            id: create.projectId,
-            title: create.title,
-            workspaceRoot: create.workspaceRoot,
-            defaultModelSelection: null,
-            scripts: [],
-            createdAt: "2026-10-01T00:00:00.000Z",
-            updatedAt: "2026-10-01T00:00:00.000Z",
-            deletedAt: null,
-          };
+          input.deleted?.push(remove.projectId);
+          return undefined as never;
         }),
+      create: (create) =>
+        (input.onCreate ?? Effect.void).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              input.registered.push(create.workspaceRoot);
+              return {
+                id: create.projectId,
+                title: create.title,
+                workspaceRoot: create.workspaceRoot,
+                defaultModelSelection: null,
+                scripts: [],
+                createdAt: "2026-10-01T00:00:00.000Z",
+                updatedAt: "2026-10-01T00:00:00.000Z",
+                deletedAt: null,
+              };
+            }),
+          ),
+        ),
     }),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
     Layer.mock(GitVcsDriver.GitVcsDriver)({}),
@@ -564,13 +575,18 @@ it.effect("a client below full access registers an existing folder under home, a
     const taken = path.join(home, "dev", "taken");
     const hidden = path.join(home, ".ssh", "keys");
     const library = path.join(home, "Library", "Thing");
+    const shoutedLibrary = path.join(home, "LIBRARY", "Keychains");
+    // The input schema trims "repo ", so only a symlink can name it.
+    const padded = path.join(home, "dev", "repo ");
+    const paddedAlias = path.join(home, "dev", "padded-alias");
     const outside = path.join(root, "outside");
     const file = path.join(home, "dev", "notes.txt");
     const alias = path.join(home, "dev", "alias");
-    for (const dir of [repo, taken, hidden, library, outside])
+    for (const dir of [repo, taken, hidden, library, shoutedLibrary, padded, outside])
       yield* fileSystem.makeDirectory(dir, { recursive: true });
     yield* fileSystem.writeFileString(file, "notes");
     yield* fileSystem.symlink(taken, alias);
+    yield* fileSystem.symlink(padded, paddedAlias);
     const realRepo = yield* fileSystem.realPath(repo);
 
     const run = (
@@ -634,6 +650,8 @@ it.effect("a client below full access registers an existing folder under home, a
       [{ title: "Outside", workspaceRoot: outside }, "capability_denied"],
       [{ title: "Hidden", workspaceRoot: hidden }, "capability_denied"],
       [{ title: "Library", workspaceRoot: library }, "capability_denied"],
+      [{ title: "Shouted", workspaceRoot: shoutedLibrary }, "capability_denied"],
+      [{ title: "Padded", workspaceRoot: paddedAlias }, "invalid_request"],
       [
         { title: "Escape", workspaceRoot: path.join(repo, "..", "..", "..", "outside") },
         "capability_denied",
@@ -661,6 +679,37 @@ it.effect("a client below full access registers an existing folder under home, a
       },
     );
     expect(readOnly).toEqual([]);
+
+    // A folder swapped for a symlink to a hidden folder while it registers is undone.
+    const swapped = path.join(home, "dev", "swapped");
+    yield* fileSystem.makeDirectory(swapped);
+    const swapRegistered: Array<string> = [];
+    const swapDeleted: Array<string> = [];
+    const swapDependencies = registrationHarness({
+      access: "auto",
+      home,
+      registered: swapRegistered,
+      deleted: swapDeleted,
+      onCreate: fileSystem
+        .remove(swapped, { recursive: true })
+        .pipe(Effect.andThen(fileSystem.symlink(hidden, swapped)), Effect.orDie),
+    });
+    const swappedResult = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(swapDependencies),
+        ),
+      ),
+      Effect.flatMap((built) =>
+        built
+          .handle("t3_project_create", { title: "Swapped", workspaceRoot: swapped })
+          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(swapDependencies)),
+      ),
+      Effect.map((chunks) => chunks.at(-1)?.result),
+    );
+    expect(swappedResult).toMatchObject({ code: "capability_denied" });
+    expect(swapRegistered).toHaveLength(1);
+    expect(swapDeleted).toHaveLength(1);
 
     // Full access keeps its old reach: outside home, as given, without vetting.
     const full: Array<string> = [];
