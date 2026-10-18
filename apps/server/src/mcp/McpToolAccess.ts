@@ -212,6 +212,42 @@ export const writesEnvironment = <P, A, E, R>(
   return declare((params: P) => check.pipe(Effect.flatMap(() => handle(params, check))));
 };
 
+/**
+ * Like `writesEnvironment`, but a caller below full access may also make the
+ * write when `belowFullAccess` vets these params; what it returns is what the
+ * handler gets, so the vetting can also canonicalise them. Read-only clients,
+ * callers without a live run and plan-mode callers are refused as before, and
+ * full-access callers skip the vetting.
+ */
+export const writesEnvironmentWhen = <P, A, E, R, RV>(
+  belowFullAccess: (params: P, caller: Caller) => Effect.Effect<P, OrchestratorMcpFailure, RV>,
+  handle: (
+    params: P,
+    check: Effect.Effect<Caller, OrchestratorMcpFailure, CheckServices>,
+  ) => Effect.Effect<A, E, R>,
+) => {
+  const fullAccessCheck = orchestratingCaller.pipe(
+    Effect.tap((caller) => assertFullAccess(caller, fullAccessRequired)),
+  );
+  return declare((params: P) =>
+    Effect.gen(function* () {
+      const caller = yield* orchestratingCaller;
+      if (isFullAccess(caller)) return yield* handle(params, fullAccessCheck);
+      if (caller.limits.interactionMode !== "default") {
+        return yield* new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message: fullAccessRequired,
+        });
+      }
+      const vetted = yield* belowFullAccess(params, caller);
+      return yield* handle(vetted, orchestratingCaller);
+    }),
+  );
+};
+
+const isFullAccess = (caller: Caller) =>
+  caller.limits.runtimeMode === "full-access" && caller.limits.interactionMode === "default";
+
 type CheckServices = Effect.Services<typeof orchestratingCaller>;
 
 type Declarations<Handlers> = {
