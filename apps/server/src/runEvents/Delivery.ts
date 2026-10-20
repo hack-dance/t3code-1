@@ -8,15 +8,13 @@ import * as Stream from "effect/Stream";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
-import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type { RunEventsConfig } from "./config.ts";
 
-export class DeliveryError extends Schema.TaggedError<DeliveryError>()(
-  "RunEventDeliveryError",
-  {},
-) {}
+export class DeliveryError extends Schema.TaggedError<DeliveryError>()("RunEventDeliveryError", {
+  retryable: Schema.Boolean,
+}) {}
 
 export class Delivery extends Context.Service<
   Delivery,
@@ -42,23 +40,29 @@ const make = Effect.gen(function* () {
     const headers: Record<string, string> = {};
     if (config.authHeaderEnv) {
       const value = process.env[config.authHeaderEnv];
-      if (!value) return yield* new DeliveryError();
+      if (!value) return yield* new DeliveryError({ retryable: false });
       headers.Authorization = value;
     }
     if (config.hmacSecretEnv) {
       const value = process.env[config.hmacSecretEnv];
-      if (!value) return yield* new DeliveryError();
+      if (!value) return yield* new DeliveryError({ retryable: false });
       headers["X-T3-Signature-256"] =
         `sha256=${NodeCrypto.createHmac("sha256", value).update(body).digest("hex")}`;
     }
-    yield* HttpClientRequest.post(config.url).pipe(
+    const response = yield* HttpClientRequest.post(config.url).pipe(
       HttpClientRequest.setHeaders(headers),
       HttpClientRequest.bodyText(body, "application/json"),
       http.execute,
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
       Effect.provideService(FetchHttpClient.RequestInit, { redirect: "error" }),
-      Effect.mapError(() => new DeliveryError()),
+      Effect.mapError(() => new DeliveryError({ retryable: true })),
+      // HTTP spans include endpoint paths, queries, and custom headers.
+      Effect.withTracerEnabled(false),
     );
+    if (response.status < 200 || response.status >= 300) {
+      return yield* new DeliveryError({
+        retryable: response.status === 408 || response.status === 429 || response.status >= 500,
+      });
+    }
   }, Effect.scoped);
   const command = Effect.fn("RunEvents.command")(function* (
     config: NonNullable<RunEventsConfig["command"]>,
@@ -74,8 +78,8 @@ const make = Effect.gen(function* () {
           killSignal: "SIGKILL",
         }),
       )
-      .pipe(Effect.mapError(() => new DeliveryError()));
-    if (code !== 0) return yield* new DeliveryError();
+      .pipe(Effect.mapError(() => new DeliveryError({ retryable: true })));
+    if (code !== 0) return yield* new DeliveryError({ retryable: true });
   }, Effect.scoped);
   return Delivery.of({ webhook, command });
 });

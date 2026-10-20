@@ -7,10 +7,16 @@ const Timeout = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 60_000 
 const RetryCount = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 5 }));
 const Backoff = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 10_000 }));
 
+const SinkSelection = {
+  providerInstanceIds: Schema.optional(Schema.Array(Schema.NonEmptyString)),
+  projectIds: Schema.optional(Schema.Array(Schema.NonEmptyString)),
+};
+
 export const RunEventsConfig = Schema.Struct({
   hostLabel: Schema.optional(Schema.String),
   webhook: Schema.optional(
     Schema.Struct({
+      ...SinkSelection,
       url: Schema.String.check(
         Schema.makeFilter((value) => {
           try {
@@ -30,6 +36,7 @@ export const RunEventsConfig = Schema.Struct({
   ),
   command: Schema.optional(
     Schema.Struct({
+      ...SinkSelection,
       executable: Schema.NonEmptyString,
       args: Schema.optional(Schema.Array(Schema.String)),
       timeoutMs: Schema.optional(Timeout),

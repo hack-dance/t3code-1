@@ -24,8 +24,12 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { RunEventsConfig } from "./config.ts";
 import * as Delivery from "./Delivery.ts";
-import { createPayload, lifecycleStatus, workspaceLabel } from "./payload.ts";
+import { RunEvent, createPayload, lifecycleStatus, workspaceLabel } from "./payload.ts";
 import * as RunEvents from "./RunEvents.ts";
+
+const decodePayload = Schema.decodeUnknownSync(Schema.fromJsonString(RunEvent));
+
+const selection = { providerInstanceIds: ["provider-a"], projectIds: ["project-a"] };
 
 const at = DateTime.makeUnsafe("2026-01-01T00:00:00Z");
 const later = DateTime.makeUnsafe("2026-01-01T00:00:02Z");
@@ -48,19 +52,23 @@ const run: OrchestrationV2Run = {
 };
 const decodeEvent = Schema.decodeUnknownSync(OrchestrationV2DomainEvent);
 
-function event(status: OrchestrationV2Run["status"], id = run.id): OrchestrationV2DomainEvent {
+function event(
+  status: OrchestrationV2Run["status"],
+  id = run.id,
+  occurredAt = later,
+): OrchestrationV2DomainEvent {
   return decodeEvent({
     type: status === "starting" ? "run.created" : "run.updated",
     id: `event-${status}`,
     threadId: run.threadId,
-    occurredAt: later,
+    occurredAt,
     payload: {
       ...run,
       id,
       status,
       startedAt: status === "starting" ? null : at,
       completedAt: ["completed", "failed", "interrupted", "cancelled"].includes(status)
-        ? later
+        ? occurredAt
         : null,
     },
   });
@@ -99,7 +107,7 @@ afterEach(() => {
 });
 
 describe("run events", () => {
-  it.effect("is a no-op without a sink, without acquiring runtime dependencies", () =>
+  it.effect("is a no-op without a configured sink", () =>
     Effect.gen(function* () {
       const service = yield* RunEvents.RunEvents;
       yield* service.onEvent(event("starting"));
@@ -221,7 +229,7 @@ describe("run events", () => {
         expect(JSON.stringify(bodies)).not.toContain("SENTINEL");
       }).pipe(
         Effect.provide(
-          RunEvents.layerWithConfig({ webhook: { url: "https://example.com" } }).pipe(
+          RunEvents.layerWithConfig({ webhook: { ...selection, url: "https://example.com" } }).pipe(
             Layer.provide(dependencies),
             Layer.provide(delivery),
           ),
@@ -248,7 +256,7 @@ describe("run events", () => {
                 return yield* Effect.never;
               }
               yield* Deferred.succeed(retry, undefined);
-              return yield* new Delivery.DeliveryError();
+              return yield* new Delivery.DeliveryError({ retryable: true });
             }),
           command: () =>
             Effect.gen(function* () {
@@ -270,8 +278,14 @@ describe("run events", () => {
         }).pipe(
           Effect.provide(
             RunEvents.layerWithConfig({
-              webhook: { url: "https://example.com", timeoutMs: 100, retries: 1, backoffMs: 10 },
-              command: { executable: "hook" },
+              webhook: {
+                ...selection,
+                url: "https://example.com",
+                timeoutMs: 100,
+                retries: 1,
+                backoffMs: 10,
+              },
+              command: { ...selection, executable: "hook" },
             }).pipe(Layer.provide(dependencies), Layer.provide(delivery)),
           ),
         );
@@ -299,12 +313,291 @@ it.effect(
         expect(statuses).toEqual(["started", "completed"]);
       }).pipe(
         Effect.provide(
-          RunEvents.layerWithConfig({ command: { executable: "hook" } }).pipe(
+          RunEvents.layerWithConfig({ command: { ...selection, executable: "hook" } }).pipe(
             Layer.provide(
               Layer.mock(Orchestrator.OrchestratorV2)({
                 streamDomainEvents: Stream.fromIterable([event("starting"), event("completed")]),
               }),
             ),
+            Layer.provide(dependencies),
+            Layer.provide(delivery),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped),
+);
+
+it.effect("reports new terminal revisions after preparation retries, preserving retry IDs", () =>
+  Effect.gen(function* () {
+    const done = yield* Deferred.make<void>();
+    const delivered: RunEvent[] = [];
+    const attempts: string[] = [];
+    const failedDeliveries = new Set<string>();
+    const delivery = Layer.succeed(Delivery.Delivery, {
+      command: () => Effect.void,
+      webhook: (_, body) =>
+        Effect.gen(function* () {
+          const payload = decodePayload(body);
+          attempts.push(payload.eventId);
+          if (!failedDeliveries.has(payload.eventId)) {
+            failedDeliveries.add(payload.eventId);
+            return yield* new Delivery.DeliveryError({ retryable: true });
+          }
+          delivered.push(payload);
+          if (delivered.length === 4) yield* Deferred.succeed(done, undefined);
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const service = yield* RunEvents.RunEvents;
+      const secondFailure = DateTime.makeUnsafe("2026-01-01T00:00:03Z");
+      const completed = DateTime.makeUnsafe("2026-01-01T00:00:04Z");
+      for (const update of [
+        event("preparing"),
+        event("failed"),
+        event("failed"),
+        event("preparing"),
+        event("failed", run.id, secondFailure),
+        event("failed", run.id, secondFailure),
+        event("preparing"),
+        event("starting"),
+        event("completed", run.id, completed),
+        event("completed", run.id, completed),
+      ]) {
+        yield* service.onEvent(update);
+      }
+      yield* TestClock.adjust(1000);
+      yield* Deferred.await(done);
+      expect(delivered.map(({ status }) => status)).toEqual([
+        "failed",
+        "failed",
+        "started",
+        "completed",
+      ]);
+      expect(new Set(delivered.map(({ eventId }) => eventId)).size).toBe(4);
+      expect(attempts).toEqual(delivered.flatMap(({ eventId }) => [eventId, eventId]));
+    }).pipe(
+      Effect.provide(
+        RunEvents.layerWithConfig({
+          webhook: { ...selection, url: "https://example.com", backoffMs: 1 },
+        }).pipe(Layer.provide(dependencies), Layer.provide(delivery)),
+      ),
+    );
+  }).pipe(Effect.scoped),
+);
+
+it.effect("permanent delivery errors release the queue without retry delay", () =>
+  Effect.gen(function* () {
+    const done = yield* Deferred.make<void>();
+    const statuses: string[] = [];
+    const delivery = Layer.succeed(Delivery.Delivery, {
+      command: () => Effect.void,
+      webhook: (_, body) =>
+        Effect.gen(function* () {
+          const { status } = decodePayload(body);
+          statuses.push(status);
+          if (status === "started") return yield* new Delivery.DeliveryError({ retryable: false });
+          yield* Deferred.succeed(done, undefined);
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const service = yield* RunEvents.RunEvents;
+      yield* service.onEvent(event("starting"));
+      yield* service.onEvent(event("completed"));
+      yield* Deferred.await(done);
+      expect(statuses).toEqual(["started", "completed"]);
+    }).pipe(
+      Effect.provide(
+        RunEvents.layerWithConfig({
+          webhook: { ...selection, url: "https://example.com", retries: 5 },
+        }).pipe(Layer.provide(dependencies), Layer.provide(delivery)),
+      ),
+    );
+  }).pipe(Effect.scoped),
+);
+
+it.effect("does not repeat failed metadata lookups for the same lifecycle notification", () =>
+  Effect.gen(function* () {
+    for (const failedLookup of ["thread", "project"] as const) {
+      const threadRead = vi.fn(() =>
+        failedLookup === "thread"
+          ? Effect.die("lookup failure")
+          : Effect.succeed({ projectId: ProjectId.make("project-a"), worktreePath: null } as never),
+      );
+      const projectRead = vi.fn(() => Effect.die("lookup failure"));
+      yield* Effect.gen(function* () {
+        const service = yield* RunEvents.RunEvents;
+        for (const status of ["starting", "running", "waiting", "waiting"] as const)
+          yield* service.onEvent(event(status));
+        expect(threadRead).toHaveBeenCalledTimes(1);
+        expect(projectRead).toHaveBeenCalledTimes(failedLookup === "project" ? 1 : 0);
+      }).pipe(
+        Effect.provide(
+          RunEvents.layerWithConfig({ webhook: { ...selection, url: "https://example.com" } }).pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.mock(ProjectionStore.ProjectionStoreV2)({ getThread: threadRead }),
+                Layer.mock(ProjectStore.ProjectStoreV2)({ get: projectRead }),
+                Layer.mock(Delivery.Delivery)({}),
+              ),
+            ),
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+    }
+  }).pipe(Effect.scoped),
+);
+
+it.effect("isolates sinks by both project and provider instance, even for the same engine", () =>
+  Effect.gen(function* () {
+    const webhookDone = yield* Deferred.make<void>();
+    const commandDone = yield* Deferred.make<void>();
+    const webhookEvents: RunEvent[] = [];
+    const commandEvents: RunEvent[] = [];
+    const delivery = Layer.succeed(Delivery.Delivery, {
+      webhook: (_, body) =>
+        Effect.sync(() => webhookEvents.push(decodePayload(body))).pipe(
+          Effect.andThen(Deferred.succeed(webhookDone, undefined)),
+          Effect.asVoid,
+        ),
+      command: (_, body) =>
+        Effect.sync(() => commandEvents.push(decodePayload(body))).pipe(
+          Effect.andThen(Deferred.succeed(commandDone, undefined)),
+          Effect.asVoid,
+        ),
+    });
+    const isolated = Layer.mergeAll(
+      Layer.mock(ProjectionStore.ProjectionStoreV2)({
+        getThread: (threadId) =>
+          Effect.succeed({
+            projectId: ProjectId.make(threadId === "thread-a" ? "project-a" : "project-b"),
+            worktreePath: null,
+          } as never),
+      }),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: Effect.succeed(
+          ["provider-a", "provider-b"].map(
+            (instanceId) =>
+              ({ instanceId: ProviderInstanceId.make(instanceId), driver: "codex" }) as never,
+          ),
+        ),
+      }),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* RunEvents.RunEvents;
+      for (const [threadId, providerInstanceId, id] of [
+        ["thread-a", "provider-b", "cross-a"],
+        ["thread-b", "provider-a", "cross-b"],
+        ["thread-a", "provider-a", "allowed-a"],
+        ["thread-b", "provider-b", "allowed-b"],
+      ] as const) {
+        yield* service.onEvent(
+          decodeEvent({
+            type: "run.created",
+            id: `event-${id}`,
+            threadId,
+            occurredAt: at,
+            payload: {
+              ...run,
+              id,
+              threadId,
+              providerInstanceId,
+              modelSelection: { instanceId: providerInstanceId, model: "model-a" },
+            },
+          }),
+        );
+      }
+      yield* Deferred.await(webhookDone);
+      yield* Deferred.await(commandDone);
+      expect(webhookEvents.map(({ threadId }) => threadId)).toEqual(["thread-a"]);
+      expect(commandEvents.map(({ threadId }) => threadId)).toEqual(["thread-b"]);
+      expect([...webhookEvents, ...commandEvents].map(({ provider }) => provider)).toEqual([
+        "codex",
+        "codex",
+      ]);
+    }).pipe(
+      Effect.provide(
+        RunEvents.layerWithConfig({
+          webhook: { ...selection, url: "https://example.com" },
+          command: {
+            executable: "hook",
+            providerInstanceIds: ["provider-b"],
+            projectIds: ["project-b"],
+          },
+        }).pipe(Layer.provide(isolated), Layer.provide(dependencies), Layer.provide(delivery)),
+      ),
+    );
+  }).pipe(Effect.scoped),
+);
+
+it.effect("missing and empty sink allowlists deliver nothing and avoid metadata reads", () =>
+  Effect.gen(function* () {
+    const read = vi.fn(() => Effect.die("unexpected metadata lookup"));
+    for (const filters of [
+      {},
+      { providerInstanceIds: ["provider-a"] },
+      { projectIds: ["project-a"] },
+      { providerInstanceIds: [], projectIds: ["project-a"] },
+      { providerInstanceIds: ["provider-a"], projectIds: [] },
+    ]) {
+      yield* Effect.gen(function* () {
+        const service = yield* RunEvents.RunEvents;
+        yield* service.onEvent(event("starting"));
+        yield* service.onEvent(event("completed"));
+      }).pipe(
+        Effect.provide(
+          RunEvents.layerWithConfig({
+            webhook: { ...filters, url: "https://example.com" },
+            command: { ...filters, executable: "hook" },
+          }).pipe(
+            Layer.provide(Layer.mock(ProjectionStore.ProjectionStoreV2)({ getThread: read })),
+            Layer.provide(dependencies),
+            Layer.provide(Layer.mock(Delivery.Delivery)({})),
+          ),
+        ),
+      );
+    }
+    expect(read).not.toHaveBeenCalled();
+  }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "keeps an active run's start marker while newer runs pass through the bounded cache",
+  () =>
+    Effect.gen(function* () {
+      const done = yield* Deferred.make<void>();
+      const statuses: string[] = [];
+      const delivery = Layer.succeed(Delivery.Delivery, {
+        command: () => Effect.void,
+        webhook: (_, body) =>
+          Effect.gen(function* () {
+            const { status } = decodePayload(body);
+            statuses.push(status);
+            if (status === "completed") yield* Deferred.succeed(done, undefined);
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const service = yield* RunEvents.RunEvents;
+        yield* service.onEvent(event("starting"));
+        for (let index = 0; index < 4100; index++) {
+          yield* service.onEvent(
+            decodeEvent({
+              type: "run.created",
+              id: `event-${index}`,
+              threadId: run.threadId,
+              occurredAt: at,
+              payload: { ...run, id: `excluded-${index}`, providerInstanceId: "provider-b" },
+            }),
+          );
+          if (index % 1000 === 0) yield* service.onEvent(event("waiting"));
+        }
+        yield* service.onEvent(event("waiting"));
+        yield* service.onEvent(event("completed"));
+        yield* Deferred.await(done);
+        expect(statuses).toEqual(["started", "completed"]);
+      }).pipe(
+        Effect.provide(
+          RunEvents.layerWithConfig({ webhook: { ...selection, url: "https://example.com" } }).pipe(
             Layer.provide(dependencies),
             Layer.provide(delivery),
           ),

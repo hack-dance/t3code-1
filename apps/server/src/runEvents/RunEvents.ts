@@ -1,4 +1,5 @@
 import type { OrchestrationV2DomainEvent } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -14,7 +15,7 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { forkParked } from "../serverActivation.ts";
 import { loadConfig, type RunEventsConfig } from "./config.ts";
 import * as Delivery from "./Delivery.ts";
-import { RunEvent, createPayload, lifecycleStatus, workspaceLabel } from "./payload.ts";
+import { RunEvent, runEventId, createPayload, lifecycleStatus, workspaceLabel } from "./payload.ts";
 
 const encodePayload = Schema.encodeEffect(Schema.fromJsonString(RunEvent));
 
@@ -36,10 +37,18 @@ export const layerWithConfig = (config: RunEventsConfig | undefined) =>
       const path = yield* Path.Path;
       const providers = yield* ProviderRegistry.ProviderRegistry;
       const delivery = yield* Delivery.Delivery;
-      const queues: Array<Queue.Queue<string>> = [];
+      const sinks: Array<{
+        queue: Queue.Queue<string>;
+        selection: Pick<
+          NonNullable<RunEventsConfig["webhook"]>,
+          "providerInstanceIds" | "projectIds"
+        >;
+      }> = [];
 
       const startSink = Effect.fn("RunEvents.startSink")(function* (
         options: {
+          providerInstanceIds?: ReadonlyArray<string> | undefined;
+          projectIds?: ReadonlyArray<string> | undefined;
           timeoutMs?: number | undefined;
           retries?: number | undefined;
           backoffMs?: number | undefined;
@@ -47,7 +56,7 @@ export const layerWithConfig = (config: RunEventsConfig | undefined) =>
         send: (body: string) => Effect.Effect<void, Delivery.DeliveryError>,
       ) {
         const queue = yield* Queue.dropping<string>(256);
-        queues.push(queue);
+        sinks.push({ queue, selection: options });
         const deliver = Effect.fn("RunEvents.deliver")(function* (body: string) {
           for (let attempt = 0; attempt <= (options.retries ?? 2); attempt++) {
             const result = yield* send(body).pipe(
@@ -55,6 +64,15 @@ export const layerWithConfig = (config: RunEventsConfig | undefined) =>
               Effect.exit,
             );
             if (result._tag === "Success") return;
+            const error = Cause.findErrorOption(result.cause);
+            if (
+              Option.isSome(error) &&
+              error.value._tag === "RunEventDeliveryError" &&
+              !error.value.retryable
+            ) {
+              yield* Effect.logWarning("Run event delivery rejected; not retrying.");
+              return;
+            }
             if (attempt < (options.retries ?? 2))
               yield* Effect.sleep(Math.min(30_000, (options.backoffMs ?? 250) * 2 ** attempt));
           }
@@ -72,16 +90,39 @@ export const layerWithConfig = (config: RunEventsConfig | undefined) =>
       }
 
       // Bound duplicate tracking; stable IDs let receivers deduplicate after eviction/restart.
-      const reported = new Set<string>();
+      const reported = new Map<string, { started: boolean; terminalId: string | undefined }>();
       // The stream sees every domain event. Avoid a tracing span for unrelated events.
       const onEvent = Effect.fnUntraced(
         function* (event: OrchestrationV2DomainEvent) {
           if (event.type !== "run.created" && event.type !== "run.updated") return;
           const status = lifecycleStatus(event.payload);
           if (!status) return;
-          const key = `${event.threadId}:${event.payload.id}:${status === "started" ? "start" : "finish"}`;
-          if (reported.has(key)) return;
+          const key = `${event.threadId}:${event.payload.id}`;
+          const id = runEventId(event.payload, status, event.occurredAt);
+          const previous = reported.get(key) ?? { started: false, terminalId: undefined };
+          const duplicate = status === "started" ? previous.started : previous.terminalId === id;
+          // One LRU entry per run also records failed lookups, avoiding warning storms.
+          reported.delete(key);
+          reported.set(key, {
+            started: previous.started || status === "started",
+            terminalId: status === "started" ? previous.terminalId : id,
+          });
+          if (reported.size > 4096) {
+            const oldest = reported.keys().next().value;
+            if (oldest !== undefined) reported.delete(oldest);
+          }
+          if (duplicate) return;
+          const providerSinks = sinks.filter(
+            ({ selection }) =>
+              selection.providerInstanceIds?.includes(event.payload.providerInstanceId) &&
+              selection.projectIds?.length,
+          );
+          if (providerSinks.length === 0) return;
           const thread = yield* projections.getThread(event.threadId);
+          const eligibleSinks = providerSinks.filter(({ selection }) =>
+            selection.projectIds?.includes(thread.projectId),
+          );
+          if (eligibleSinks.length === 0) return;
           const project = yield* projects.get(thread.projectId, { includeDeleted: true });
           const catalog = yield* providers.getProviders;
           const payload = createPayload({
@@ -97,13 +138,8 @@ export const layerWithConfig = (config: RunEventsConfig | undefined) =>
               : "",
             hostLabel: config.hostLabel ?? "",
           });
-          reported.add(key);
-          if (reported.size > 4096) {
-            const oldest = reported.values().next().value;
-            if (oldest !== undefined) reported.delete(oldest);
-          }
           const body = yield* encodePayload(payload);
-          for (const queue of queues) {
+          for (const { queue } of eligibleSinks) {
             const accepted = yield* Queue.offer(queue, body);
             if (!accepted) yield* Effect.logWarning("Run event queue full; notification dropped.");
           }

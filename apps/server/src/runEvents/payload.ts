@@ -44,6 +44,18 @@ export function workspaceLabel(path: Path.Path, root: string, worktree: string |
     : relative.split(path.sep).join("/") || ".";
 }
 
+export function runEventId(
+  run: OrchestrationV2Run,
+  status: RunEvent["status"],
+  occurredAt: DateTime.Utc,
+): string {
+  const revision =
+    status === "started"
+      ? "start"
+      : `finish:${status}:${DateTime.toEpochMillis(run.completedAt ?? occurredAt)}`;
+  return `t3:${run.threadId}:${run.id}:${revision}`;
+}
+
 export function createPayload(input: {
   run: OrchestrationV2Run;
   status: RunEvent["status"];
@@ -59,8 +71,8 @@ export function createPayload(input: {
   const timestamp = status === "started" ? input.occurredAt : (run.completedAt ?? input.occurredAt);
   return {
     type,
-    // One start and one terminal notification per logical run, including provider retries.
-    eventId: `t3:${run.threadId}:${run.id}:${status === "started" ? "start" : "finish"}`,
+    // A preparation retry may settle the same run again at a new completion time.
+    eventId: runEventId(run, status, input.occurredAt),
     timestamp: DateTime.formatIso(timestamp),
     threadId: run.threadId,
     turnOrdinal: run.ordinal,
