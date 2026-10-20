@@ -29,6 +29,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
+import * as ProjectEventSink from "./ProjectEventSink.ts";
 
 export class ProjectCloneTracker extends Context.Service<
   ProjectCloneTracker,
@@ -78,6 +79,8 @@ interface TrackedClone {
   readonly snapshot: ProjectCloneSnapshot;
   readonly fiber: Fiber.Fiber<unknown, unknown> | null;
   readonly hooks: ProjectCloneHooks;
+  readonly transferContext?: ProjectCloneStartInput["transferContext"];
+  readonly projectName: string;
   readonly input: {
     /** What git is given; may carry credentials and never leaves the server. */
     readonly cloneUrl: string;
@@ -88,6 +91,7 @@ interface TrackedClone {
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  const eventSink = yield* ProjectEventSink.ProjectEventSink;
   const repositories = yield* SourceControlRepositoryService.SourceControlRepositoryService;
   const clones = yield* Ref.make(new Map<ProjectId, TrackedClone>());
   const changes = yield* PubSub.unbounded<ReadonlyArray<ProjectCloneSnapshot>>();
@@ -168,11 +172,29 @@ export const make = Effect.gen(function* () {
       },
     })).pipe(Effect.asVoid);
 
+  const emitCloneEvent = (
+    tracked: TrackedClone,
+    type: "clone.started" | "clone.completed" | "clone.failed",
+  ) =>
+    tracked.transferContext
+      ? eventSink.emit({
+          type,
+          context: tracked.transferContext,
+          projectName: tracked.projectName,
+          remoteUrl: tracked.input.cloneUrl,
+          destinationPath: tracked.input.destinationPath,
+          files: [],
+        })
+      : Effect.void;
+
   const finish = Effect.fn("ProjectCloneTracker.finish")(function* (
     projectId: ProjectId,
     phase: "done" | "failed" | "cancelled",
     error: string | null,
   ) {
+    const tracked = (yield* Ref.get(clones)).get(projectId);
+    if (tracked)
+      yield* emitCloneEvent(tracked, phase === "done" ? "clone.completed" : "clone.failed");
     const endedAt = yield* nowIso;
     yield* modify(projectId, (tracked) => ({
       ...tracked,
@@ -221,6 +243,7 @@ export const make = Effect.gen(function* () {
     const current = yield* Ref.get(clones);
     const tracked = current.get(projectId);
     if (!tracked) return;
+    yield* emitCloneEvent(tracked, "clone.started");
     const fiber = yield* runClone(projectId, tracked).pipe(Effect.forkIn(cloneScope));
     yield* Ref.update(clones, (map) => {
       const existing = map.get(projectId);
@@ -261,6 +284,8 @@ export const make = Effect.gen(function* () {
           snapshot,
           fiber: null,
           hooks,
+          transferContext: input.transferContext,
+          projectName: input.title,
           input: {
             cloneUrl: prepared.cloneUrl,
             destinationPath: prepared.destinationPath,

@@ -106,6 +106,7 @@ import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
+import * as ProjectEventSink from "./project/ProjectEventSink.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
@@ -381,6 +382,7 @@ const layerSourceControlRepositoryService = SourceControlRepositoryService.layer
 
 const layerProjectCloneTracker = ProjectCloneTracker.layer.pipe(
   Layer.provide(layerSourceControlRepositoryService),
+  Layer.provideMerge(ProjectEventSink.layer),
 );
 
 const layerKnownWorkspaces = KnownWorkspaces.layer.pipe(

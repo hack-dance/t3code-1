@@ -364,6 +364,7 @@ import {
   ProjectCloneStartResult,
   ProjectCloneSubscribeInput,
 } from "./projectClone.ts";
+import { ProjectFilesCopiedInput } from "./projectTransfer.ts";
 import {
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
@@ -386,6 +387,7 @@ export const WS_METHODS = {
   projectsReadFile: "projects.readFile",
   projectsSearchContents: "projects.searchContents",
   projectsSearchEntries: "projects.searchEntries",
+  projectsFilesCopied: "projects.filesCopied",
   projectsWriteFile: "projects.writeFile",
   projectsMutate: "projects.mutate",
   projectsEnsureScratch: "projects.ensureScratch",
@@ -1234,6 +1236,12 @@ const WsProjectsReadFileRpc = Rpc.make(WS_METHODS.projectsReadFile, {
   error: Schema.Union([ProjectReadFileError, EnvironmentAuthorizationError]),
 });
 
+const WsProjectsFilesCopiedRpc = Rpc.make(WS_METHODS.projectsFilesCopied, {
+  payload: ProjectFilesCopiedInput,
+  success: Schema.Void,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   payload: ProjectWriteFileInput,
   success: ProjectWriteFileResult,
@@ -1993,6 +2001,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsSearchEntriesRpc,
   WsProjectsEnsureScratchRpc,
   WsProjectsCreateNewRpc,
+  WsProjectsFilesCopiedRpc,
   WsProjectsWriteFileRpc,
   WsProjectsMutateRpc,
   WsShellOpenInEditorRpc,

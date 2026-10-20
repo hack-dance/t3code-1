@@ -6,6 +6,7 @@ import {
   SourceControlProviderKind,
   SourceControlRepositoryInfo,
 } from "./sourceControl.ts";
+import { ProjectTransferContext } from "./projectTransfer.ts";
 
 export const PROJECT_CLONE_DETAIL_MAX_LENGTH = 200;
 export const PROJECT_CLONE_ERROR_MAX_LENGTH = 1000;
@@ -53,6 +54,7 @@ export const ProjectCloneStartInput = Schema.Struct({
   remoteUrl: Schema.optional(TrimmedNonEmptyString),
   destinationPath: TrimmedNonEmptyString,
   protocol: Schema.optional(SourceControlCloneProtocol),
+  transferContext: Schema.optional(ProjectTransferContext),
 });
 export type ProjectCloneStartInput = typeof ProjectCloneStartInput.Type;
 

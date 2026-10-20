@@ -169,7 +169,11 @@ function AddProjectToMachineDialog({ request }: { request: AddProjectToMachineRe
     const projectId = newProjectId();
     try {
       await addProjectToMachine({
-        source: { environmentId: project.environmentId, cwd: project.workspaceRoot },
+        source: {
+          environmentId: project.environmentId,
+          cwd: project.workspaceRoot,
+          label: source?.label ?? "This machine",
+        },
         subdirectory: projectSubdirectory(
           project.repositoryIdentity?.rootPath,
           project.workspaceRoot,
@@ -180,6 +184,8 @@ function AddProjectToMachineDialog({ request }: { request: AddProjectToMachineRe
         remoteUrl,
         destinationPath: destinationPath.trim(),
         files: files.filter((file) => selectedFiles.has(file.path)).map((file) => file.path),
+        reportTransferEvents:
+          targetEnvironment?.serverConfig?.environment.capabilities.projectTransferEvents === true,
       });
       close();
       openClonedProject(scopeProjectRef(target.environmentId, projectId));
