@@ -1815,6 +1815,7 @@ describe("CodexAdapterV2 session initialize", () => {
   const openReplaySession = (
     transcript: CodexReplay.CodexAppServerReplayTranscript,
     beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
+    resources?: { readonly settings: CodexSettings; readonly environment: NodeJS.ProcessEnv },
   ) =>
     Effect.gen(function* () {
       const driver = yield* CodexReplay.makeReplayDriver(
@@ -1822,13 +1823,18 @@ describe("CodexAdapterV2 session initialize", () => {
         beforeEmitInbound === undefined ? {} : { beforeEmitInbound },
       );
       let initializeRequests = 0;
+      const openedHomes: Array<string> = [];
+      const requests: Array<{ method: string; params: unknown }> = [];
       const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
         instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
-        settings: DEFAULT_CODEX_SETTINGS,
-        environment: {},
+        settings: resources?.settings ?? DEFAULT_CODEX_SETTINGS,
+        environment: resources?.environment ?? {},
         clientFactory: {
           open: (openInput) =>
-            Layer.build(CodexReplay.layerReplayWithDriver(driver)).pipe(
+            Effect.sync(() => {
+              openedHomes.push(openInput.settings.homePath);
+            }).pipe(
+              Effect.andThen(Layer.build(CodexReplay.layerReplayWithDriver(driver))),
               Effect.flatMap((context) =>
                 Effect.service(CodexClient.CodexAppServerClient).pipe(Effect.provide(context)),
               ),
@@ -1838,6 +1844,7 @@ describe("CodexAdapterV2 session initialize", () => {
                     ...client,
                     request: (method, params) =>
                       Effect.sync(() => {
+                        requests.push({ method, params });
                         if (method === "initialize") initializeRequests++;
                       }).pipe(Effect.andThen(client.request(method, params))),
                   }) satisfies CodexClient.CodexAppServerClient["Service"],
@@ -1870,12 +1877,194 @@ describe("CodexAdapterV2 session initialize", () => {
             modelSelection: CODEX_TEST_MODEL_SELECTION,
             runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
           }),
+        forkThread: runtime.forkThread,
         initializeRequests: () => initializeRequests,
+        openedHomes,
+        requests,
       };
     });
 
   const replayPreamble = (nativeThreadId: string) =>
     codexReplayPreamble({ nativeThreadId, nativeTurnId: "unused", prompt: "unused" });
+
+  const resourceForkInput = (
+    now: DateTime.Utc,
+  ): ProviderAdapter.ProviderAdapterV2ForkThreadInput => ({
+    sourceProviderThread: {
+      id: ProviderThreadId.make("provider-thread-resources-source"),
+      driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+      providerInstanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+      providerSessionId: ProviderSessionId.make("provider-session-resources-source"),
+      appThreadId: ThreadId.make("thread-resources-source"),
+      ownerNodeId: null,
+      nativeThreadRef: {
+        driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+        nativeId: "source-thread",
+        strength: "strong",
+      },
+      nativeConversationHeadRef: null,
+      status: "idle",
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+    targetThreadId: ThreadId.make("thread-resources"),
+  });
+
+  it.effect.each(["start", "fork"] as const)(
+    "initializes a fresh session before %s with resolved MCP overrides",
+    (operation) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-resources-" });
+        const instance = path.join(root, "instance");
+        const source = path.join(root, "source");
+        yield* fs.makeDirectory(path.join(source, "skills"), { recursive: true });
+        yield* fs.makeDirectory(instance);
+        yield* fs.writeFileString(
+          path.join(source, "config.toml"),
+          '[mcp_servers.docs]\ncommand = "example-mcp"\n',
+        );
+        const file = path.join(root, "resources.json");
+        yield* fs.writeFileString(
+          file,
+          encodeUnknownJson({
+            codex: {
+              skillsDirectory: path.join(source, "skills"),
+              mcpConfigFile: path.join(source, "config.toml"),
+            },
+          }),
+        );
+        const preamble = replayPreamble("resource-thread");
+        const session = yield* openReplaySession(
+          makeCodexReplayTranscript({
+            scenario: "resources",
+            entries: [
+              ...preamble.slice(0, 3),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 2,
+                  method: "config/read",
+                  params: { cwd: "/workspace", includeLayers: false },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  id: 2,
+                  result: {
+                    config: { mcp_servers: { inherited: { command: "other" } } },
+                    origins: {},
+                  },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "skills/extraRoots/set",
+                  params: { extraRoots: [] },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 3, result: {} } },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "skills/list",
+                  params: { cwds: ["/workspace"], forceReload: true },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 4, result: { data: [] } } },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 5,
+                  method: `thread/${operation}`,
+                  params: {
+                    ...(operation === "fork" ? { threadId: "source-thread" } : {}),
+                    config: {
+                      ...CodexAdapterV2.CODEX_THREAD_CONFIG,
+                      "skills.config": [],
+                      mcp_servers: {
+                        inherited: { command: "other", enabled: false },
+                        docs: { command: "example-mcp" },
+                      },
+                    },
+                  },
+                },
+              },
+              withReplayRequestId(preamble[4]!, 5),
+            ],
+          }),
+          undefined,
+          {
+            settings: { ...DEFAULT_CODEX_SETTINGS, homePath: instance },
+            environment: { T3CODE_AGENT_RESOURCES_FILE: file },
+          },
+        );
+        assert.equal(session.initializeRequests(), 0);
+        const now = yield* DateTime.now;
+        const thread =
+          operation === "start"
+            ? yield* session.ensureThread("thread-resources")
+            : yield* session.forkThread(resourceForkInput(now));
+        assert.equal(session.initializeRequests(), 1);
+        assert.deepNestedPropertyVal(
+          session.requests.find((request) => request.method === `thread/${operation}`),
+          "params.config.mcp_servers",
+          {
+            inherited: { command: "other", enabled: false },
+            docs: { command: "example-mcp" },
+          },
+        );
+        assert.equal(thread.nativeThreadRef?.nativeId, "resource-thread");
+        assert.equal(session.openedHomes[0], instance);
+        assert.isFalse(yield* fs.exists(path.join(instance, "config.toml")));
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect("wraps fresh fork initialization failures as fork errors", () =>
+    Effect.gen(function* () {
+      const preamble = replayPreamble("fork-initialize-failure");
+      const session = yield* openReplaySession(
+        makeCodexReplayTranscript({
+          scenario: "fork-initialize-failure",
+          entries: [
+            preamble[0]!,
+            {
+              type: "emit_inbound",
+              frame: { id: 1, error: { code: -32603, message: "Codex is not ready." } },
+            },
+          ],
+        }),
+      );
+      const error = yield* session
+        .forkThread(resourceForkInput(yield* DateTime.now))
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "ProviderAdapterForkThreadError");
+      assert.propertyVal(error, "providerThreadId", "provider-thread-resources-source");
+      assert.deepEqual(
+        session.requests.map((request) => request.method),
+        ["initialize"],
+      );
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
 
   it.effect("sends one initialize when two threads start on a fresh session at once", () =>
     Effect.gen(function* () {
