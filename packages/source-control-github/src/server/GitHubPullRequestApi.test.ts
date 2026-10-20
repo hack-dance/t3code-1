@@ -1152,27 +1152,34 @@ layer("GitHubPullRequestApi.layer", (it) => {
           ],
         },
       ]);
-      const read = Effect.flatMap(GitHubPullRequestApi.GitHubPullRequestApi, (cli) =>
-        cli.getPullRequestStack({
-          cwd: "/w",
-          repository: "acme/poll",
-          host: "github.com",
-          number: 9,
+      const directories: Array<string | null> = [];
+      mockedCredential.mockImplementation((host) =>
+        Effect.gen(function* () {
+          const cwd = yield* GitHubCredentials.RepositoryDirectory;
+          directories.push(cwd);
+          return { token: Redacted.make(`fake:${cwd}`), fingerprint: `${host}:${cwd}` };
         }),
       );
+      const read = (cwd: string) =>
+        Effect.flatMap(GitHubPullRequestApi.GitHubPullRequestApi, (cli) =>
+          cli.getPullRequestStack({
+            cwd,
+            repository: "acme/poll",
+            host: "github.com",
+            number: 9,
+          }),
+        );
       mockedExecute.mockReturnValueOnce(
         Effect.succeed(output(listing, false, false, { etag: 'W/"v1"' })),
       );
-      const first = yield* read;
+      const first = yield* read("/w");
       mockedExecute.mockReturnValueOnce(Effect.succeed(output("", false, false, {}, 304)));
-      const second = yield* read;
-      mockedCredential.mockImplementationOnce(() =>
-        Effect.succeed({ token: Redacted.make("other"), fingerprint: "github.com:other" }),
-      );
+      const second = yield* read("/w");
       mockedExecute.mockReturnValueOnce(Effect.succeed(output(listing)));
-      yield* read;
+      yield* read("/personal");
 
       assert.deepStrictEqual(second, first);
+      expect(directories).toEqual(["/w", "/w", "/personal"]);
       expect(callAt(0)).not.toHaveProperty("ifNoneMatch");
       expect(callAt(1)).toMatchObject({ ifNoneMatch: 'W/"v1"' });
       // Another account never revalidates the first account's answer.
