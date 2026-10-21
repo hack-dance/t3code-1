@@ -7,15 +7,15 @@ release setup.
 
 ## Automatic upstream sync
 
-A fleet job (`computer t3 fork-sync` in `roodboi/machine`, scheduled daily on the
-M3) keeps `hd/nightly` current. When upstream publishes a newer Nightly, it merges
-that release tag into `hd/nightly` with a merge commit (never a rebase), has Codex
-resolve conflicts in favor of the HD fixes, runs typecheck, lint and the HD test
-set, and gets independent Codex and Claude reviews. Only when both approve does it
-push `hd/nightly` (fast-forward, never forced) from the fleet machine and dispatch
-`publish` with `source=head` for the merged tag. It stops and reports on conflicts
-it cannot resolve, failing checks, or a missing approval. Upstream workflow-file
-changes arrive through that normal push, so Actions never writes workflows.
+An external scheduled job keeps `hd/nightly` current. When upstream publishes a
+newer Nightly, it merges that release tag into `hd/nightly` with a merge commit
+(never a rebase), resolves conflicts in favor of the HD fixes, runs typecheck,
+lint and the HD test set, and requires independent code reviews. Only when they
+approve does it push `hd/nightly` (fast-forward, never forced) and dispatch
+`publish` with `source=head` for the merged tag. It stops and reports on
+conflicts it cannot resolve, failing checks, or a missing approval. Upstream
+workflow-file changes arrive through that normal push, so Actions never writes
+workflows.
 
 ## Running the workflow
 
