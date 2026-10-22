@@ -198,6 +198,29 @@ function main() {
     repository: config.repository,
   };
   Fs.writeFileSync("hd-release.json", JSON.stringify(inputs, null, 2) + "\n");
+  // Scheduled runs publish only new maintenance commits. A commit that is already released is
+  // a clean no-op before any upstream or coverage prerequisite can fail the run.
+  if (mode === "publish" && process.env.HD_SKIP_IF_PUBLISHED === "true") {
+    const existing = publishedRelease(
+      JSON.parse(
+        exec("gh", [
+          "api",
+          "--paginate",
+          "--slurp",
+          `repos/${config.repository}/releases?per_page=100`,
+        ]),
+      ).flat(),
+      sourceSha,
+    );
+    if (existing) {
+      const message = `${sourceSha} is already published as ${existing.tag_name}; nothing to publish.`;
+      console.log(message);
+      if (process.env.GITHUB_STEP_SUMMARY)
+        Fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## HD publish skipped\n\n${message}\n`);
+      if (process.env.GITHUB_OUTPUT) Fs.appendFileSync(process.env.GITHUB_OUTPUT, "skip=true\n");
+      return;
+    }
+  }
   const releases = JSON.parse(
     exec("gh", ["api", "--paginate", "--slurp", `repos/${config.upstream}/releases?per_page=100`]),
   ).flat();
@@ -248,17 +271,6 @@ function main() {
       ]),
     ).flat();
     assertPublishCoverage(prior, targets);
-    // Scheduled runs publish only new maintenance commits; a repeat is a clean no-op.
-    const existing =
-      process.env.HD_SKIP_IF_PUBLISHED === "true" ? publishedRelease(prior, sourceSha) : null;
-    if (existing) {
-      const message = `${sourceSha} is already published as ${existing.tag_name}; nothing to publish.`;
-      console.log(message);
-      if (process.env.GITHUB_STEP_SUMMARY)
-        Fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## HD publish skipped\n\n${message}\n`);
-      if (process.env.GITHUB_OUTPUT) Fs.appendFileSync(process.env.GITHUB_OUTPUT, "skip=true\n");
-      return;
-    }
   }
   const version = releaseVersion(release.tag_name, process.env.GITHUB_RUN_ID, mode);
   const metadata = {

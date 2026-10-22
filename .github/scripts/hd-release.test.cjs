@@ -342,3 +342,57 @@ test("scheduled publication skips a maintenance commit that is already released"
   Assert.match(workflow, /HD_SKIP_IF_PUBLISHED: \$\{\{ github\.event_name == 'schedule' \}\}/);
   Assert.match(workflow, /needs\.prepare\.outputs\.skip != 'true'/);
 });
+
+test("an already released scheduled commit skips before upstream and coverage checks", (t) => {
+  const sha = "c".repeat(40);
+  const dir = Fs.mkdtempSync(Path.join(Os.tmpdir(), "hd-skip-"));
+  t.after(() => Fs.rmSync(dir, { recursive: true, force: true }));
+  const bin = Path.join(dir, "bin");
+  Fs.mkdirSync(bin);
+  const fork = [
+    {
+      tag_name: "v0.1.2-nightly.20261022.1",
+      body: `Maintenance: ${sha}`,
+      assets: [{ name: "T3-Code-x64.exe" }],
+    },
+  ];
+  // Upstream has a newer, unmerged nightly; reaching it would fail the run.
+  const upstream = [
+    { tag_name: "v0.1.3-nightly.20261023.9", published_at: "2026-10-23T00:00:00Z" },
+  ];
+  Fs.writeFileSync(Path.join(dir, "fork.json"), JSON.stringify([fork]));
+  Fs.writeFileSync(Path.join(dir, "upstream.json"), JSON.stringify([upstream]));
+  Fs.writeFileSync(
+    Path.join(bin, "gh"),
+    `#!/bin/sh\ncase "$*" in *hack-dance/t3code-1/releases*) cat "${dir}/fork.json";; *) cat "${dir}/upstream.json";; esac\n`,
+    { mode: 0o755 },
+  );
+  Fs.writeFileSync(
+    Path.join(bin, "git"),
+    `#!/bin/sh\n[ "$1" = rev-parse ] && echo ${sha} && exit 0\nexit 1\n`,
+    { mode: 0o755 },
+  );
+  const output = Path.join(dir, "output");
+  const result = ChildProcess.spawnSync(
+    process.execPath,
+    [Path.join(__dirname, "hd-release.cjs")],
+    {
+      cwd: dir,
+      encoding: "utf8",
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        HD_MODE: "publish",
+        HD_SOURCE: "head",
+        HD_TARGETS: "pilot",
+        HD_REQUIRE_LATEST_MERGED: "true",
+        HD_SKIP_IF_PUBLISHED: "true",
+        GITHUB_REPOSITORY: "hack-dance/t3code-1",
+        GITHUB_RUN_ID: "42",
+        GITHUB_OUTPUT: output,
+      },
+    },
+  );
+  Assert.equal(result.status, 0, result.stderr);
+  Assert.equal(Fs.readFileSync(output, "utf8"), "skip=true\n");
+  Assert.match(result.stdout, /already published as v0\.1\.2-nightly\.20261022\.1/);
+});

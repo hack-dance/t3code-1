@@ -37,8 +37,9 @@ exact upstream release tag. Both upstream bases ship on the HD Nightly train.
 
 Scheduled runs publish every six hours only when the newest upstream Nightly is
 already merged into the maintenance commit. An unmerged release or failed source
-preparation stops the run before building or publishing. Signing and publication
-gates still apply.
+preparation stops the run before building or publishing. A maintenance commit
+that is already released as an HD Nightly is skipped cleanly without building.
+Signing and publication gates still apply.
 
 Modes:
 
