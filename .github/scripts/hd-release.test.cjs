@@ -248,3 +248,73 @@ test("pilot publication preserves all previously shipped HD architectures", () =
   );
   Assert.throws(() => assertPublishCoverage([], "unknown"), /Unknown/);
 });
+
+test("scheduled head publication requires the latest upstream release to be merged", (t) => {
+  const f = fixture(t);
+  const older = f.commit("upstream.txt", "one\n", "upstream one");
+  const newer = f.commit("upstream.txt", "two\n", "upstream two");
+  f.git("checkout", "hd");
+  f.git("-c", "commit.gpgsign=false", "merge", "--no-ff", "--no-edit", older);
+  const releases = [
+    { tag_name: "v1.2.4-nightly.20261016.2", published_at: "2026-10-16T12:00:00Z" },
+    { tag_name: "v1.2.4-nightly.20261015.1", published_at: "2026-10-15T12:00:00Z" },
+  ];
+  const candidates = headCandidates(
+    releases,
+    "nightly",
+    undefined,
+    (tag) => (tag === releases[0].tag_name ? newer : older),
+    true,
+  );
+  Assert.throws(
+    () =>
+      selectMergedRelease({
+        sourceDir: f.sourceDir,
+        sourceSha: f.git("rev-parse", "HEAD"),
+        candidates,
+      }),
+    /Merge upstream/,
+  );
+  f.git("-c", "commit.gpgsign=false", "merge", "--no-ff", "--no-edit", newer);
+  Assert.equal(
+    selectMergedRelease({
+      sourceDir: f.sourceDir,
+      sourceSha: f.git("rev-parse", "HEAD"),
+      candidates,
+    }).sha,
+    newer,
+  );
+});
+
+test("workflow schedules publish while manual dispatch preserves every mode", () => {
+  const workflow = Fs.readFileSync(Path.join(__dirname, "../workflows/hd-release.yml"), "utf8");
+  const selection =
+    /      - name: Select mode\n[\s\S]*?        run: \|\n([\s\S]*?)(?=      - name:)/.exec(
+      workflow,
+    )[1];
+  for (const [event, requested, expected] of [
+    ["schedule", "", "publish"],
+    ["workflow_dispatch", "check", "check"],
+    ["workflow_dispatch", "candidate", "candidate"],
+    ["workflow_dispatch", "publish", "publish"],
+  ]) {
+    const root = Fs.mkdtempSync(Path.join(Os.tmpdir(), "hd-mode-"));
+    try {
+      const output = Path.join(root, "output");
+      ChildProcess.execFileSync("bash", ["-e", "-c", selection], {
+        env: {
+          ...process.env,
+          EVENT_NAME: event,
+          REQUESTED_MODE: requested,
+          REQUESTED_SOURCE: "head",
+          GITHUB_OUTPUT: output,
+        },
+      });
+      Assert.equal(Fs.readFileSync(output, "utf8"), `mode=${expected}\nsource=head\n`);
+    } finally {
+      Fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+  Assert.match(workflow, /HD_REQUIRE_LATEST_MERGED: \$\{\{ github.event_name == 'schedule' \}\}/);
+  Assert.match(workflow, /bundle:\n    needs: prepare/);
+});

@@ -74,8 +74,12 @@ jobs:
         env:
           REQUESTED_MODE: ${{ inputs.mode }}
           REQUESTED_SOURCE: ${{ inputs.source }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          echo "mode=${REQUESTED_MODE:-check}" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT_NAME" == schedule ]]; then
+            REQUESTED_MODE=publish
+          fi
+          echo "mode=${REQUESTED_MODE:-candidate}" >> "$GITHUB_OUTPUT"
           echo "source=${REQUESTED_SOURCE:-head}" >> "$GITHUB_OUTPUT"
       - name: Require the expected commit
         if: inputs.expected_sha != ''
@@ -142,6 +146,7 @@ jobs:
           HD_SOURCE: ${{ steps.mode.outputs.source }}
           HD_UPSTREAM_CHANNEL: ${{ inputs.upstream_channel || 'nightly' }}
           HD_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          HD_REQUIRE_LATEST_MERGED: ${{ github.event_name == 'schedule' }}
           HD_TARGETS: ${{ inputs.targets || 'pilot' }}
         run: node .github/scripts/hd-release.cjs
       - uses: actions/upload-artifact@v7

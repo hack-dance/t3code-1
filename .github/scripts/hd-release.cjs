@@ -54,12 +54,14 @@ function assertPublishCoverage(releases, targets) {
 
 /**
  * Head source candidates, newest first: the pinned release only, or every published release
- * of the channel. `resolve` maps a tag to its upstream commit, or null when it is missing.
+ * of the channel. Scheduled publication requires the latest release, so an unresolved sync
+ * cannot silently publish an older base. `resolve` maps a tag to its commit, or null if missing.
  */
-function headCandidates(releases, channel, pinned, resolve) {
-  const ordered = pinned
-    ? [selectRelease(releases, channel, pinned)]
-    : channelReleases(releases, channel);
+function headCandidates(releases, channel, pinned, resolve, requireLatest = false) {
+  const ordered =
+    pinned || requireLatest
+      ? [selectRelease(releases, channel, pinned)]
+      : channelReleases(releases, channel);
   return ordered.map((item) => ({
     tag: item.tag_name,
     sha: resolve(item.tag_name),
@@ -197,18 +199,24 @@ function main() {
       `https://github.com/${config.upstream}.git`,
       "+refs/tags/*:refs/hd-upstream/tags/*",
     ]);
-    const candidates = headCandidates(releases, channel, process.env.HD_UPSTREAM_TAG, (tag) => {
-      try {
-        return exec("git", [
-          "rev-parse",
-          "--verify",
-          "--quiet",
-          `refs/hd-upstream/tags/${tag}^{commit}`,
-        ]);
-      } catch {
-        return null; // A release whose tag is missing upstream cannot be the merged base.
-      }
-    });
+    const candidates = headCandidates(
+      releases,
+      channel,
+      process.env.HD_UPSTREAM_TAG,
+      (tag) => {
+        try {
+          return exec("git", [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            `refs/hd-upstream/tags/${tag}^{commit}`,
+          ]);
+        } catch {
+          return null; // A release whose tag is missing upstream cannot be the merged base.
+        }
+      },
+      process.env.HD_REQUIRE_LATEST_MERGED === "true",
+    );
     const merged = selectMergedRelease({ sourceDir: process.cwd(), sourceSha, candidates });
     release = merged.release;
     commit = { sha: merged.sha };
