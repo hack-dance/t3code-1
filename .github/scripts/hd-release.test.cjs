@@ -11,6 +11,7 @@ const {
   releaseVersion,
   prepareCandidate,
   assertPublishCoverage,
+  publishedRelease,
 } = require("./hd-release.cjs");
 
 test("selects published upstream releases by channel and publication time", () => {
@@ -317,4 +318,27 @@ test("workflow schedules publish while manual dispatch preserves every mode", ()
   }
   Assert.match(workflow, /HD_REQUIRE_LATEST_MERGED: \$\{\{ github.event_name == 'schedule' \}\}/);
   Assert.match(workflow, /bundle:\n    needs: prepare/);
+});
+
+test("scheduled publication skips a maintenance commit that is already released", () => {
+  const sha = "a".repeat(40);
+  const releases = [
+    { tag_name: "v0.1.2-nightly.20261022.9", draft: true, body: `Maintenance: ${sha}` },
+    { tag_name: "v0.1.2-preview.20261022.8", body: `Maintenance: ${sha}` },
+    { tag_name: "v0.1.2-nightly.20261022.7", body: `Maintenance: ${"b".repeat(40)}` },
+  ];
+  Assert.equal(publishedRelease(releases, sha), undefined);
+  releases.push({
+    tag_name: "v0.1.2-nightly.20261022.6",
+    body: `Upstream: x\n\nMaintenance: ${sha}\n`,
+  });
+  Assert.equal(publishedRelease(releases, sha).tag_name, "v0.1.2-nightly.20261022.6");
+  Assert.equal(
+    publishedRelease([{ tag_name: "v0.1.2-nightly.20261022.5", target_commitish: sha }], sha)
+      .tag_name,
+    "v0.1.2-nightly.20261022.5",
+  );
+  const workflow = Fs.readFileSync(Path.join(__dirname, "../workflows/hd-release.yml"), "utf8");
+  Assert.match(workflow, /HD_SKIP_IF_PUBLISHED: \$\{\{ github\.event_name == 'schedule' \}\}/);
+  Assert.match(workflow, /needs\.prepare\.outputs\.skip != 'true'/);
 });

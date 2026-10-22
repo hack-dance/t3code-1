@@ -52,6 +52,19 @@ function assertPublishCoverage(releases, targets) {
   }
 }
 
+/** A published, non-draft HD Nightly already built from this maintenance commit. */
+function publishedRelease(releases, sourceSha) {
+  return releases.find(
+    (release) =>
+      !release.draft &&
+      /^v\d+\.\d+\.\d+-nightly\./.test(release.tag_name) &&
+      (release.target_commitish === sourceSha ||
+        (release.body || "")
+          .split(/\r?\n/)
+          .some((line) => line.trim() === `Maintenance: ${sourceSha}`)),
+  );
+}
+
 /**
  * Head source candidates, newest first: the pinned release only, or every published release
  * of the channel. Scheduled publication requires the latest release, so an unresolved sync
@@ -235,6 +248,17 @@ function main() {
       ]),
     ).flat();
     assertPublishCoverage(prior, targets);
+    // Scheduled runs publish only new maintenance commits; a repeat is a clean no-op.
+    const existing =
+      process.env.HD_SKIP_IF_PUBLISHED === "true" ? publishedRelease(prior, sourceSha) : null;
+    if (existing) {
+      const message = `${sourceSha} is already published as ${existing.tag_name}; nothing to publish.`;
+      console.log(message);
+      if (process.env.GITHUB_STEP_SUMMARY)
+        Fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## HD publish skipped\n\n${message}\n`);
+      if (process.env.GITHUB_OUTPUT) Fs.appendFileSync(process.env.GITHUB_OUTPUT, "skip=true\n");
+      return;
+    }
   }
   const version = releaseVersion(release.tag_name, process.env.GITHUB_RUN_ID, mode);
   const metadata = {
@@ -311,6 +335,7 @@ module.exports = {
   releaseVersion,
   prepareCandidate,
   assertPublishCoverage,
+  publishedRelease,
 };
 if (require.main === module) {
   try {

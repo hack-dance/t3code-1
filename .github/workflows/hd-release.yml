@@ -53,6 +53,7 @@ jobs:
       ref: ${{ steps.prepare.outputs.ref }}
       mode: ${{ steps.mode.outputs.mode }}
       source: ${{ steps.mode.outputs.source }}
+      skip: ${{ steps.prepare.outputs.skip }}
     steps:
       # checkout's credential cleanup traverses orphaned vendored gitlinks,
       # even with submodules disabled. Public checkouts need no credentials.
@@ -147,6 +148,7 @@ jobs:
           HD_UPSTREAM_CHANNEL: ${{ inputs.upstream_channel || 'nightly' }}
           HD_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
           HD_REQUIRE_LATEST_MERGED: ${{ github.event_name == 'schedule' }}
+          HD_SKIP_IF_PUBLISHED: ${{ github.event_name == 'schedule' }}
           HD_TARGETS: ${{ inputs.targets || 'pilot' }}
         run: node .github/scripts/hd-release.cjs
       - uses: actions/upload-artifact@v7
@@ -160,7 +162,7 @@ jobs:
 
   bundle:
     needs: prepare
-    if: needs.prepare.outputs.mode != 'check'
+    if: needs.prepare.outputs.mode != 'check' && needs.prepare.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
