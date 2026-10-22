@@ -80,6 +80,24 @@ const makeServerConfig = Effect.fn(function* (baseDir: string) {
 });
 
 it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
+  it.effect.each([undefined, "", "/config/event-hooks.json"])(
+    "advertises project transfer reporting only with a nonempty config path: %s",
+    (configPath) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = yield* fs.makeTempDirectoryScoped();
+        const environment = yield* ServerEnvironment.ServerEnvironment.pipe(
+          Effect.provide(layerServerEnvironment(baseDir)),
+          Effect.provideService(
+            HostProcess.Environment,
+            configPath === undefined ? {} : { T3CODE_EVENT_HOOKS_CONFIG: configPath },
+          ),
+        );
+        const descriptor = yield* environment.getDescriptor;
+        expect(descriptor.capabilities.projectTransferEvents).toBe(Boolean(configPath));
+      }),
+  );
+
   it.effect("publishes proven install ownership only for manually updated servers", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

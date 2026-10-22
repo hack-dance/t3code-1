@@ -208,6 +208,10 @@ export function createProjectEnvironmentAtoms<R, E>(
       scheduler: projectScheduler,
       concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
     }),
+    filesCopied: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:files-copied",
+      tag: WS_METHODS.projectsFilesCopied,
+    }),
     writeFile: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:projects:write-file",
       tag: WS_METHODS.projectsWriteFile,

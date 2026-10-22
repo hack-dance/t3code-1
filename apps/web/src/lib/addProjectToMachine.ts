@@ -67,7 +67,11 @@ export function isDefaultCopiedFile(path: string): boolean {
 }
 
 export interface AddProjectToMachineInput {
-  readonly source: { readonly environmentId: EnvironmentId; readonly cwd: string };
+  readonly source: {
+    readonly environmentId: EnvironmentId;
+    readonly cwd: string;
+    readonly label: string;
+  };
   /** Where the source project sits below its repository root, or "". */
   readonly subdirectory: string;
   readonly target: { readonly environmentId: EnvironmentId; readonly label: string };
@@ -76,6 +80,7 @@ export interface AddProjectToMachineInput {
   readonly remoteUrl: string;
   readonly destinationPath: string;
   readonly files: ReadonlyArray<string>;
+  readonly reportTransferEvents?: boolean;
 }
 
 function failureMessage(result: Parameters<typeof squashAtomCommandFailure>[0]): string {
@@ -173,6 +178,14 @@ export async function addProjectToMachine(input: AddProjectToMachineInput): Prom
         createdAt: new Date().toISOString(),
         remoteUrl: input.remoteUrl,
         destinationPath: input.destinationPath,
+        ...(input.reportTransferEvents
+          ? {
+              transferContext: {
+                sourceLabel: input.source.label,
+                targetLabel: input.target.label,
+              },
+            }
+          : {}),
       },
     },
     { label: "Add project to machine", reportFailure: false },
@@ -190,6 +203,7 @@ export async function addProjectToMachine(input: AddProjectToMachineInput): Prom
       return;
     }
     const failed: Array<string> = [];
+    const copied: Array<string> = [];
     for (const read of reads) {
       if (!("contents" in read)) {
         failed.push(`${read.relativePath}: ${read.error}`);
@@ -212,6 +226,7 @@ export async function addProjectToMachine(input: AddProjectToMachineInput): Prom
       );
       if (written._tag === "Failure")
         failed.push(`${read.relativePath}: ${failureMessage(written)}`);
+      else copied.push(written.value.relativePath);
     }
     setFileCopy(
       copyKey,
@@ -223,5 +238,23 @@ export async function addProjectToMachine(input: AddProjectToMachineInput): Prom
             failures: failed,
           },
     );
+    if (input.reportTransferEvents && copied.length > 0) {
+      // Reporting is independent of the copy, including disconnected or older servers.
+      void runAtomCommand(
+        appAtomRegistry,
+        projectEnvironment.filesCopied,
+        {
+          environmentId: input.target.environmentId,
+          input: {
+            context: { sourceLabel: input.source.label, targetLabel: input.target.label },
+            projectName: input.title,
+            remoteUrl: input.remoteUrl,
+            destinationPath: started.value.cwd,
+            files: copied,
+          },
+        },
+        { label: "Report copied files", reportFailure: false },
+      ).catch(() => undefined);
+    }
   })();
 }

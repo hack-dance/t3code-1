@@ -47,6 +47,7 @@ const PROJECT = {
 
 const makeHarness = Effect.fn("TestProjectCommands.makeHarness")(function* () {
   const metadataRequests: string[][] = [];
+  const copiedFileReports: unknown[] = [];
   const file = { byteLength: 5 };
   const readResponse = {
     wait: Effect.void as Effect.Effect<void>,
@@ -79,6 +80,8 @@ const makeHarness = Effect.fn("TestProjectCommands.makeHarness")(function* () {
               file.byteLength = 10;
               return { relativePath: "foo" };
             }),
+          [WS_METHODS.projectsFilesCopied]: (input: unknown) =>
+            Effect.sync(() => void copiedFileReports.push(input)),
           [WS_METHODS.filesystemGetMetadata]: (input: { paths: string[] }) =>
             Effect.sync(() => {
               metadataRequests.push(input.paths);
@@ -141,7 +144,52 @@ const makeHarness = Effect.fn("TestProjectCommands.makeHarness")(function* () {
   const openScratch = Effect.promise(() =>
     commands.openScratch.run(registry, { environmentId: ENVIRONMENT_ID, input: {} }),
   );
-  return { registry, storedProject, openScratch, commands, metadataRequests, readResponse };
+  return {
+    registry,
+    storedProject,
+    openScratch,
+    commands,
+    metadataRequests,
+    readResponse,
+    copiedFileReports,
+  };
+});
+
+describe("copied-file reporting permissions", () => {
+  it.effect("requires filesystem write permission on the destination", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      const input = {
+        environmentId: ENVIRONMENT_ID,
+        input: {
+          context: { sourceLabel: "host-a", targetLabel: "build-box" },
+          projectName: "example-project",
+          destinationPath: "/workspace/project",
+          files: [".env"],
+        },
+      };
+      const allowed = yield* Effect.promise(() => h.commands.filesCopied.run(h.registry, input));
+      expect(allowed._tag).toBe("Success");
+      expect(h.copiedFileReports).toHaveLength(1);
+      h.registry.set(
+        sessions(ENVIRONMENT_ID),
+        AsyncResult.success({
+          authenticated: true,
+          auth: {
+            policy: "remote-reachable" as const,
+            bootstrapMethods: [],
+            sessionMethods: [],
+            sessionCookieName: "test",
+          },
+          scopes: [],
+          permissions: [],
+        }),
+      );
+      const denied = yield* Effect.promise(() => h.commands.filesCopied.run(h.registry, input));
+      expect(denied._tag).toBe("Failure");
+      expect(h.copiedFileReports).toHaveLength(1);
+    }).pipe(Effect.scoped),
+  );
 });
 
 describe("writeFile metadata", () => {

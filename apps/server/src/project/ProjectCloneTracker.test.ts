@@ -13,6 +13,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
+import * as ProjectEventSink from "./ProjectEventSink.ts";
 import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
 import { parseGitCloneProgressLine } from "./gitCloneProgress.ts";
 
@@ -31,6 +32,7 @@ function makeHarness(options?: {
   const created: Array<{ projectId: ProjectId; workspaceRoot: string }> = [];
   const cloned: Array<ProjectId> = [];
   const discarded: Array<string> = [];
+  const events: Array<Parameters<ProjectEventSink.ProjectEventSink["Service"]["emit"]>[0]> = [];
   const hooks: ProjectCloneTracker.ProjectCloneHooks = {
     createProject: (input) =>
       Effect.sync(() => {
@@ -39,6 +41,12 @@ function makeHarness(options?: {
     onCloned: (input) => Effect.sync(() => void cloned.push(input.projectId)),
   };
   const layer = ProjectCloneTracker.layer.pipe(
+    Layer.provide(
+      Layer.succeed(ProjectEventSink.ProjectEventSink, {
+        emit: (event) => Effect.sync(() => void events.push(event)),
+        filesCopied: () => Effect.void,
+      }),
+    ),
     Layer.provide(
       Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
         prepareClone: (input) =>
@@ -60,10 +68,88 @@ function makeHarness(options?: {
       }),
     ),
   );
-  return { layer, hooks, created, cloned, discarded };
+  return { layer, hooks, created, cloned, discarded, events };
 }
 
 describe("ProjectCloneTracker", () => {
+  it.effect("emits one failed event when a remote clone is cancelled", () => {
+    const started = Deferred.makeUnsafe<void>();
+    const harness = makeHarness({
+      clone: () => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+    });
+    return Effect.gen(function* () {
+      const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+      yield* tracker.start(
+        {
+          ...startInput,
+          title: "example-project",
+          remoteUrl: "https://example.com/team/project.git",
+          transferContext: { sourceLabel: "host-a", targetLabel: "build-box" },
+        },
+        harness.hooks,
+      );
+      yield* Deferred.await(started);
+      expect(yield* tracker.cancel(projectId)).toBe(true);
+      expect((yield* tracker.get(projectId))?.phase).toBe("cancelled");
+      expect(yield* tracker.cancel(projectId)).toBe(false);
+      expect(harness.events.map((event) => event.type)).toEqual(["clone.started", "clone.failed"]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("emits one start and outcome per remote clone attempt, including retry", () => {
+    let attempts = 0;
+    const harness = makeHarness({
+      clone: (input) =>
+        Effect.suspend(() =>
+          attempts++ === 0
+            ? Effect.fail(
+                new SourceControlRepositoryError({
+                  operation: "cloneRepository",
+                  provider: SourceControlProviderKind.make("unknown"),
+                  detail: "Example clone failure",
+                }),
+              )
+            : Effect.succeed({
+                cwd: input.destinationPath,
+                remoteUrl: input.remoteUrl ?? "",
+                repository: null,
+              }),
+        ),
+    });
+    return Effect.gen(function* () {
+      const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+      yield* tracker.start(
+        {
+          ...startInput,
+          title: "example-project",
+          remoteUrl: "https://example.com/team/project.git",
+          transferContext: { sourceLabel: "host-a", targetLabel: "build-box" },
+        },
+        harness.hooks,
+      );
+      yield* tracker.stream.pipe(
+        Stream.filter((clones) => clones[0]?.phase === "failed"),
+        Stream.runHead,
+      );
+      expect(yield* tracker.retry(projectId)).toBe(true);
+      yield* tracker.stream.pipe(
+        Stream.filter((clones) => clones[0]?.phase === "done"),
+        Stream.runHead,
+      );
+      expect(harness.events.map((event) => event.type)).toEqual([
+        "clone.started",
+        "clone.failed",
+        "clone.started",
+        "clone.completed",
+      ]);
+      expect(harness.events.every((event) => event.files.length === 0)).toBe(true);
+      expect(harness.events[0]?.context).toEqual({
+        sourceLabel: "host-a",
+        targetLabel: "build-box",
+      });
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("creates the project first and reports the clone through the stream", () => {
     const release = Deferred.makeUnsafe<void>();
     const harness = makeHarness({
@@ -99,6 +185,7 @@ describe("ProjectCloneTracker", () => {
       const final = lists.at(-1)?.[0];
       expect(final).toMatchObject({ phase: "done", percent: 100 });
       expect(harness.cloned).toEqual([projectId]);
+      expect(harness.events).toEqual([]);
 
       yield* TestClock.adjust("31 seconds");
       expect(yield* tracker.get(projectId)).toBeNull();
@@ -185,6 +272,12 @@ describe("ProjectCloneTracker", () => {
     });
     const layer = ProjectCloneTracker.layer.pipe(
       Layer.provide(
+        Layer.succeed(ProjectEventSink.ProjectEventSink, {
+          emit: () => Effect.void,
+          filesCopied: () => Effect.void,
+        }),
+      ),
+      Layer.provide(
         Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
           prepareClone: (input) =>
             Effect.succeed({
@@ -244,6 +337,12 @@ describe("ProjectCloneTracker", () => {
   it.effect("does not create a project when the clone cannot be prepared", () => {
     const harness = makeHarness();
     const layer = ProjectCloneTracker.layer.pipe(
+      Layer.provide(
+        Layer.succeed(ProjectEventSink.ProjectEventSink, {
+          emit: () => Effect.void,
+          filesCopied: () => Effect.void,
+        }),
+      ),
       Layer.provide(
         Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
           prepareClone: () =>
