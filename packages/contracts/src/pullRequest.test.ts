@@ -5,6 +5,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { PullRequestDetail, PullRequestListResult, pullRequestHostOf } from "./pullRequest.ts";
 
 const decodeDetail = Schema.decodeUnknownSync(Schema.toCodecJson(PullRequestDetail));
+const decodeListResult = Schema.decodeSync(PullRequestListResult);
 
 const LIST_RESULT: PullRequestListResult = {
   viewers: { "github.com": "bilal", "gitlab.com": "bilal.hassan" },

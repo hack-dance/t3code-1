@@ -8,6 +8,7 @@ import type {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  matchesPullRequestFilters,
   pullRequestHostActions,
   largestPullRequestReadCount,
   pullRequestEntryViewer,
