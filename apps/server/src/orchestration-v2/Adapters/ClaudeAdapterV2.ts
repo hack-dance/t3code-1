@@ -1,3 +1,4 @@
+import * as AgentResources from "../../provider/AgentResources.ts";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
 import {
@@ -134,6 +135,7 @@ import { spawnAndCollect } from "@t3tools/provider-core/server/snapshotProbe";
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
 import {
   claudeSignedOutMessage,
+  hasClaudeManagedMcpConfig,
   makeClaudeEnvironment,
   resolveClaudeHomePath,
 } from "../../provider/Drivers/ClaudeHome.ts";
@@ -3812,6 +3814,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const { attachmentsDir, fileSystem, path, crypto, idAllocator, queryRunner } = adapterOptions;
+  const baseAdapterOptions = adapterOptions;
+  const agentResources = yield* AgentResources.AgentResources.pipe(
+    Effect.provide(AgentResources.layer),
+    Effect.provideService(FileSystem.FileSystem, fileSystem),
+  );
   const subagentModelCatalog = scopeClaudeModelCatalog(
     BUNDLED_CLAUDE_MODEL_CATALOG,
     adapterOptions.settings.customModels,
@@ -3858,17 +3865,22 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
     },
   );
 
-  const userInvocableSkills = (cwd: string | null) =>
-    discoverClaudeSkills(
-      adapterOptions.settings,
-      cwd ?? undefined,
-      adapterOptions.environment,
-    ).pipe(
+  const userInvocableSkills = (
+    cwd: string | null,
+    options: ClaudeAdapterV2Options,
+    names?: ReadonlyArray<string>,
+  ) =>
+    discoverClaudeSkills(options.settings, cwd ?? undefined, options.environment).pipe(
       Effect.map(
         (skills) =>
           new Map(
             skills
-              .filter((skill) => skill.enabled && skill.userInvocable !== false)
+              .filter(
+                (skill) =>
+                  skill.enabled &&
+                  skill.userInvocable !== false &&
+                  (names === undefined || names.includes(skill.name)),
+              )
               .map((skill) => [skill.name, skill]),
           ),
       ),
@@ -3883,6 +3895,26 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
     planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
     openSession: Effect.fn("ClaudeAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
+        const resources = yield* agentResources.prepare({
+          provider: "claude",
+          instanceId: baseAdapterOptions.instanceId,
+          homePath,
+          environment: baseAdapterOptions.environment,
+          directory: path.dirname(attachmentsDir),
+        });
+        const managedMcpConfig =
+          resources === undefined
+            ? false
+            : yield* hasClaudeManagedMcpConfig().pipe(
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+              );
+        const adapterOptions =
+          resources === undefined
+            ? baseAdapterOptions
+            : {
+                ...baseAdapterOptions,
+                settings: { ...baseAdapterOptions.settings, homePath: resources.homePath },
+              };
         const sessionScope = yield* Effect.scope;
         const now = yield* DateTime.now;
         const session = providerSession({
@@ -9173,7 +9205,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             .open({
               threadId: turnInput.threadId,
               providerSessionId: input.providerSessionId,
-              options: queryOptions,
+              options:
+                resources === undefined
+                  ? queryOptions
+                  : {
+                      ...queryOptions,
+                      additionalDirectories: [
+                        ...(queryOptions.additionalDirectories ?? []),
+                        path.dirname(resources.homePath),
+                      ],
+                      strictMcpConfig: !managedMcpConfig,
+                      skills: [...resources.skills],
+                      mcpServers: { ...resources.claudeMcpServers, ...queryOptions.mcpServers },
+                    },
             })
             .pipe(
               Effect.onError(() =>
@@ -9336,7 +9380,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     attachments: turnInput.message.attachments,
                     attachmentsDir,
                     fileSystem,
-                    skills: yield* userInvocableSkills(turnInput.runtimePolicy.cwd),
+                    skills: yield* userInvocableSkills(
+                      turnInput.runtimePolicy.cwd,
+                      adapterOptions,
+                      resources?.skills,
+                    ),
                     uuid: promptUuid,
                   });
             const querySession = yield* openQuery(turnInput, nativeThreadId);
@@ -9767,7 +9815,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               priority: "now",
               attachmentsDir,
               fileSystem,
-              skills: yield* userInvocableSkills(currentTurn.input.runtimePolicy.cwd),
+              skills: yield* userInvocableSkills(
+                currentTurn.input.runtimePolicy.cwd,
+                adapterOptions,
+                resources?.skills,
+              ),
             });
             yield* backgroundForegroundSubagents(existing);
             // The turn can end while the moves are answered. A steer offered

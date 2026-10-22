@@ -1212,15 +1212,34 @@ describe("ClaudeAdapterV2 Auto-accept edits", () => {
 });
 
 describe("ClaudeAdapterV2 append-system-prompt-file launch argument", () => {
-  const startTurnWithLaunchArgs = Effect.fnUntraced(function* (launchArgs: string, cwd: string) {
+  const startTurnWithLaunchArgs = Effect.fnUntraced(function* (
+    launchArgs: string,
+    cwd: string,
+    resources?: {
+      readonly environment: NodeJS.ProcessEnv;
+      readonly homePath: string;
+      readonly managedMcpConfig?: boolean;
+    },
+    text = "What is the sentinel?",
+  ) {
     const fileSystem = yield* FileSystem.FileSystem;
     const opened: Array<ClaudeAdapterV2.ClaudeAgentSdkQueryOptions> = [];
+    const offered: Array<SDKUserMessage> = [];
     const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
       instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
-      settings: { ...DEFAULT_CLAUDE_SETTINGS, launchArgs },
-      environment: {},
+      settings: { ...DEFAULT_CLAUDE_SETTINGS, launchArgs, homePath: resources?.homePath ?? "" },
+      environment: resources?.environment ?? {},
       attachmentsDir: yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-append-" }),
-      fileSystem,
+      fileSystem:
+        resources === undefined
+          ? fileSystem
+          : {
+              ...fileSystem,
+              exists: (path) =>
+                path.endsWith("managed-mcp.json")
+                  ? Effect.succeed(resources.managedMcpConfig ?? false)
+                  : fileSystem.exists(path),
+            },
       path: yield* Path.Path,
       crypto: yield* Crypto.Crypto,
       idAllocator: yield* IdAllocator.IdAllocatorV2,
@@ -1231,7 +1250,10 @@ describe("ClaudeAdapterV2 append-system-prompt-file launch argument", () => {
             opened.push(input.options);
             return {
               messages: Stream.never,
-              offer: () => Effect.void,
+              offer: (message) =>
+                Effect.sync(() => {
+                  offered.push(message);
+                }),
               setModel: () => Effect.void,
               applyFlagSettings: () => Effect.void,
               setPermissionMode: () => Effect.void,
@@ -1270,17 +1292,93 @@ describe("ClaudeAdapterV2 append-system-prompt-file launch argument", () => {
           providerThread,
           now: yield* DateTime.now,
           attemptId: RunAttemptId.make("attempt-claude-append-file"),
-          text: "What is the sentinel?",
+          text,
           attachments: [],
           runtimePolicy,
         }),
       )
       .pipe(Effect.exit);
-    return { exit, opened };
+    return { exit, opened, offered };
   });
 
   const appendSystemPrompt = (options: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions | undefined) =>
     (options?.systemPrompt as { readonly append?: string } | undefined)?.append;
+
+  it.effect.each([
+    { skillDirectory: "review", managedMcpConfig: false },
+    { skillDirectory: "group/review", managedMcpConfig: false },
+    { skillDirectory: "review", managedMcpConfig: true },
+  ])(
+    "invokes selected folder $skillDirectory with managed MCP $managedMcpConfig",
+    ({ skillDirectory, managedMcpConfig }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-resources-" });
+          const homePath = path.join(root, "instance");
+          const skills = path.join(root, "skills");
+          yield* fs.makeDirectory(path.join(skills, skillDirectory), { recursive: true });
+          yield* fs.writeFileString(
+            path.join(skills, skillDirectory, "SKILL.md"),
+            "---\nname: frontmatter-alias\ndescription: Review a change.\n---\nReview it.",
+          );
+          const source = path.join(root, "mcp.json");
+          yield* fs.writeFileString(
+            source,
+            JSON.stringify({
+              mcpServers: {
+                docs: { command: "example-mcp" },
+                unlisted: { command: "other" },
+              },
+            }),
+          );
+          const config = path.join(root, "resources.json");
+          yield* fs.writeFileString(
+            config,
+            JSON.stringify({
+              claude: {
+                skillsDirectory: skills,
+                mcpConfigFile: source,
+                allowlist: { skills: ["review"], mcpServers: ["docs"] },
+              },
+            }),
+          );
+          const { exit, opened, offered } = yield* startTurnWithLaunchArgs(
+            "",
+            root,
+            {
+              homePath,
+              managedMcpConfig,
+              environment: { T3CODE_AGENT_RESOURCES_FILE: config, CLAUDE_CONFIG_DIR: homePath },
+            },
+            "$review check this",
+          );
+          assert.isTrue(Exit.isSuccess(exit));
+          assert.equal(opened.length, 1);
+          const options = opened[0]!;
+          assert.equal(options.strictMcpConfig, !managedMcpConfig);
+          assert.deepEqual(options.skills, ["review"]);
+          assert.equal(offered.length, 1);
+          const content = offered[0]!.message.content;
+          assert.isArray(content);
+          assert.deepEqual(content.at(-1), { type: "text", text: "/review check this" });
+          assert.deepEqual(Object.keys(options.mcpServers ?? {}), ["docs"]);
+          assert.equal(options.env?.CLAUDE_CONFIG_DIR, homePath);
+          assert.equal(
+            yield* fs.readLink(
+              path.join(options.additionalDirectories!.at(-1)!, ".claude", "skills", "review"),
+            ),
+            path.join(skills, skillDirectory),
+          );
+          assert.isFalse(yield* fs.exists(path.join(homePath, "skills")));
+        }),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
 
   it.effect("sends append launch arguments to Claude after the T3 instructions", () =>
     Effect.scoped(

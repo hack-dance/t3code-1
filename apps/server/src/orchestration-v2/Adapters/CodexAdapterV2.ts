@@ -1,3 +1,5 @@
+import * as AgentResources from "../../provider/AgentResources.ts";
+import { configureCodexAgentResources } from "../../provider/CodexAgentResources.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -1332,6 +1334,7 @@ export const CODEX_THREAD_CONFIG = {
 const CODEX_T3_MCP_TOOL_TIMEOUT_SEC = 65 * 60;
 
 function codexThreadRuntimeParams(input: {
+  readonly resourceConfig: Readonly<Record<string, Schema.Json>> | undefined;
   readonly mcpSession: McpProviderSession.McpProviderSessionConfig | undefined;
   readonly modelSelection?: { readonly model: string };
   readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
@@ -1346,6 +1349,7 @@ function codexThreadRuntimeParams(input: {
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      ...input.resourceConfig,
       ...(mcpSession === undefined
         ? {}
         : {
@@ -1513,7 +1517,16 @@ function redactCodexProtocolValue(value: unknown): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, nested]) => [
       key,
-      isSensitiveCodexProtocolKey(key) ? "[REDACTED]" : redactCodexProtocolValue(nested),
+      isSensitiveCodexProtocolKey(key)
+        ? "[REDACTED]"
+        : ["env", "headers", "httpheaders", "mcpservers"].includes(
+              key.replace(/[^a-z0-9]/gi, "").toLowerCase(),
+            ) &&
+            nested !== null &&
+            typeof nested === "object" &&
+            !Array.isArray(nested)
+          ? Object.fromEntries(Object.keys(nested).map((name) => [name, "[REDACTED]"]))
+          : redactCodexProtocolValue(nested),
     ]),
   );
 }
@@ -1521,6 +1534,7 @@ function redactCodexProtocolValue(value: unknown): unknown {
 function isSensitiveCodexProtocolKey(key: string): boolean {
   const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
   return (
+    (normalized.startsWith("mcpservers") && normalized !== "mcpservers") ||
     normalized.endsWith("authorization") ||
     normalized.endsWith("apikey") ||
     normalized.endsWith("token") ||
@@ -1714,6 +1728,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
+  const agentResources = yield* AgentResources.AgentResources.pipe(
+    Effect.provide(AgentResources.layer),
+    Effect.provideService(FileSystem.FileSystem, fileSystem),
+  );
 
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: adapterOptions.instanceId,
@@ -1736,13 +1754,37 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                 ),
               );
+        const runtimeSettings = resolvedRuntime?.config ?? adapterOptions.settings;
+        const runtimeEnvironment = resolvedRuntime?.environment ?? adapterOptions.environment;
+        const resources = yield* agentResources
+          .prepare({
+            provider: "codex",
+            instanceId: adapterOptions.instanceId,
+            homePath: runtimeSettings.homePath,
+            environment: runtimeEnvironment,
+            directory: serverConfig.stateDir,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterOpenSessionError({
+                  driver: CODEX_PROVIDER,
+                  providerSessionId: input.providerSessionId,
+                  cause,
+                }),
+            ),
+          );
+        let resourceConfig: Readonly<Record<string, Schema.Json>> | undefined;
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
           providerSessionId: input.providerSessionId,
           runtimePolicy: input.runtimePolicy,
-          settings: resolvedRuntime?.config ?? adapterOptions.settings,
-          environment: resolvedRuntime?.environment ?? adapterOptions.environment,
+          settings:
+            resources === undefined
+              ? runtimeSettings
+              : { ...runtimeSettings, homePath: resources.homePath },
+          environment: runtimeEnvironment,
         });
         const additionalContextByThread = yield* Ref.make(
           new Map<
@@ -1812,6 +1854,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 }),
               );
             yield* client.notify("initialized", undefined);
+            if (resources !== undefined) {
+              resourceConfig = yield* configureCodexAgentResources({
+                client,
+                resources,
+                cwd: input.runtimePolicy.cwd,
+              }).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem));
+            }
             yield* Ref.set(initialized, true);
           }),
         );
@@ -6612,6 +6661,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 client.request(
                   "thread/start",
                   codexThreadRuntimeParams({
+                    resourceConfig,
                     mcpSession,
                     modelSelection: threadInput.modelSelection,
                     runtimePolicy: threadInput.runtimePolicy,
@@ -6640,11 +6690,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           resumeThread: Effect.fn("CodexAdapterV2.resumeThread")(
             function* (threadInput) {
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
+              if (resources !== undefined) yield* ensureInitialized;
               // excludeTurns is not in the generated request schema yet.
               const resume = client.raw.request("thread/resume", {
                 threadId: nativeThreadId,
                 excludeTurns: true,
                 ...codexThreadRuntimeParams({
+                  resourceConfig,
                   mcpSession: yield* readMcpSession(
                     threadInput.threadId ?? threadInput.providerThread.appThreadId,
                   ),
@@ -7385,6 +7437,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   threadId,
                   excludeTurns: true,
                   ...codexThreadRuntimeParams({
+                    resourceConfig,
                     mcpSession: yield* readMcpSession(threadInput.providerThread.appThreadId),
                     modelSelection: input.modelSelection,
                     runtimePolicy: input.runtimePolicy,
@@ -7429,15 +7482,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             function* (threadInput) {
               const threadId = yield* getNativeThreadId(threadInput.sourceProviderThread);
               const boundary = yield* resolveCodexForkBoundary(threadInput);
+              const mcpSession = yield* mcpSessions.read(threadInput.targetThreadId);
               const response = yield* ensureInitialized.pipe(
-                Effect.andThen(
+                Effect.andThen(() =>
                   client.request("thread/fork", {
                     threadId,
                     ...(boundary.lastTurnId === undefined
                       ? {}
                       : { lastTurnId: boundary.lastTurnId }),
                     ...codexThreadRuntimeParams({
-                      mcpSession: yield* mcpSessions.read(threadInput.targetThreadId),
+                      resourceConfig,
+                      mcpSession,
                       ...(threadInput.modelSelection === undefined
                         ? {}
                         : { modelSelection: threadInput.modelSelection }),
