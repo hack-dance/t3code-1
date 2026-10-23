@@ -1,0 +1,166 @@
+import type { OrchestrationV2DomainEvent } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { forkParked } from "../serverActivation.ts";
+import { loadConfig, type RunEventsConfig } from "./config.ts";
+import * as Delivery from "./Delivery.ts";
+import { RunEvent, runEventId, createPayload, lifecycleStatus, workspaceLabel } from "./payload.ts";
+
+const encodePayload = Schema.encodeEffect(Schema.fromJsonString(RunEvent));
+
+export class RunEvents extends Context.Service<
+  RunEvents,
+  {
+    readonly onEvent: (event: OrchestrationV2DomainEvent) => Effect.Effect<void>;
+  }
+>()("t3/runEvents/RunEvents") {}
+
+export const layerWithConfig = (config: RunEventsConfig | undefined) =>
+  Layer.effect(
+    RunEvents,
+    Effect.gen(function* () {
+      if (!config?.webhook && !config?.command) return RunEvents.of({ onEvent: () => Effect.void });
+      const eventSink = yield* EventSink.EventSinkV2;
+      // Recovery commits before activation; retain its events without replaying older history.
+      const afterSequence = yield* eventSink.latestSequence().pipe(Effect.orDie);
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const projects = yield* ProjectStore.ProjectStoreV2;
+      const path = yield* Path.Path;
+      const providers = yield* ProviderRegistry.ProviderRegistry;
+      const delivery = yield* Delivery.Delivery;
+      const sinks: Array<{
+        queue: Queue.Queue<string>;
+        selection: Pick<
+          NonNullable<RunEventsConfig["webhook"]>,
+          "providerInstanceIds" | "projectIds"
+        >;
+      }> = [];
+
+      const startSink = Effect.fn("RunEvents.startSink")(function* (
+        options: {
+          providerInstanceIds?: ReadonlyArray<string> | undefined;
+          projectIds?: ReadonlyArray<string> | undefined;
+          timeoutMs?: number | undefined;
+          retries?: number | undefined;
+          backoffMs?: number | undefined;
+        },
+        send: (body: string) => Effect.Effect<void, Delivery.DeliveryError>,
+      ) {
+        const queue = yield* Queue.dropping<string>(256);
+        sinks.push({ queue, selection: options });
+        const deliver = Effect.fn("RunEvents.deliver")(function* (body: string) {
+          for (let attempt = 0; attempt <= (options.retries ?? 2); attempt++) {
+            const result = yield* send(body).pipe(
+              Effect.timeout(options.timeoutMs ?? 5_000),
+              Effect.exit,
+            );
+            if (result._tag === "Success") return;
+            const error = Cause.findErrorOption(result.cause);
+            if (
+              Option.isSome(error) &&
+              error.value._tag === "RunEventDeliveryError" &&
+              !error.value.retryable
+            ) {
+              yield* Effect.logWarning("Run event delivery rejected; not retrying.");
+              return;
+            }
+            if (attempt < (options.retries ?? 2))
+              yield* Effect.sleep(Math.min(30_000, (options.backoffMs ?? 250) * 2 ** attempt));
+          }
+          yield* Effect.logWarning("Run event delivery exhausted retries.");
+        });
+        yield* forkParked(Effect.forever(Queue.take(queue).pipe(Effect.flatMap(deliver))));
+      });
+      if (config.webhook) {
+        const webhook = config.webhook;
+        yield* startSink(webhook, (body) => delivery.webhook(webhook, body));
+      }
+      if (config.command) {
+        const command = config.command;
+        yield* startSink(command, (body) => delivery.command(command, body));
+      }
+
+      // Bound duplicate tracking; stable IDs let receivers deduplicate after eviction/restart.
+      const reported = new Map<string, { started: boolean; terminalId: string | undefined }>();
+      // The stream sees every domain event. Avoid a tracing span for unrelated events.
+      const onEvent = Effect.fnUntraced(
+        function* (event: OrchestrationV2DomainEvent) {
+          if (event.type !== "run.created" && event.type !== "run.updated") return;
+          const status = lifecycleStatus(event.payload);
+          if (!status) return;
+          const key = `${event.threadId}:${event.payload.id}`;
+          const id = runEventId(event.payload, status, event.occurredAt);
+          const previous = reported.get(key) ?? { started: false, terminalId: undefined };
+          const duplicate = status === "started" ? previous.started : previous.terminalId === id;
+          // One LRU entry per run also records failed lookups, avoiding warning storms.
+          reported.delete(key);
+          reported.set(key, {
+            started: previous.started || status === "started",
+            terminalId: status === "started" ? previous.terminalId : id,
+          });
+          if (reported.size > 4096) {
+            const oldest = reported.keys().next().value;
+            if (oldest !== undefined) reported.delete(oldest);
+          }
+          if (duplicate) return;
+          const providerSinks = sinks.filter(
+            ({ selection }) =>
+              selection.providerInstanceIds?.includes(event.payload.providerInstanceId) &&
+              selection.projectIds?.length,
+          );
+          if (providerSinks.length === 0) return;
+          const thread = yield* projections.getThread(event.threadId);
+          const eligibleSinks = providerSinks.filter(({ selection }) =>
+            selection.projectIds?.includes(thread.projectId),
+          );
+          if (eligibleSinks.length === 0) return;
+          const project = yield* projects.get(thread.projectId, { includeDeleted: true });
+          const catalog = yield* providers.getProviders;
+          const payload = createPayload({
+            run: event.payload,
+            status,
+            occurredAt: event.occurredAt,
+            provider:
+              catalog.find((provider) => provider.instanceId === event.payload.providerInstanceId)
+                ?.driver ?? "unknown",
+            projectName: Option.isSome(project) ? project.value.title : "",
+            workspaceLabel: Option.isSome(project)
+              ? workspaceLabel(path, project.value.workspaceRoot, thread.worktreePath)
+              : "",
+            hostLabel: config.hostLabel ?? "",
+          });
+          const body = yield* encodePayload(payload);
+          for (const { queue } of eligibleSinks) {
+            const accepted = yield* Queue.offer(queue, body);
+            if (!accepted) yield* Effect.logWarning("Run event queue full; notification dropped.");
+          }
+        },
+        (effect) =>
+          effect.pipe(
+            Effect.catchCause(() => Effect.logWarning("Run event notification skipped.")),
+          ),
+      );
+
+      yield* forkParked(
+        Stream.runForEach(eventSink.stream({ afterSequence }), (stored) =>
+          onEvent(stored.event),
+        ).pipe(Effect.catchCause(() => Effect.logWarning("Run event subscription stopped."))),
+      );
+      return RunEvents.of({ onEvent });
+    }),
+  );
+
+export const layer = Layer.unwrap(loadConfig().pipe(Effect.map(layerWithConfig))).pipe(
+  Layer.provide(Delivery.layer),
+);
