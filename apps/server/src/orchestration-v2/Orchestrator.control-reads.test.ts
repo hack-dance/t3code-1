@@ -21,6 +21,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -33,6 +34,19 @@ import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ApprovalExpiry from "./ApprovalExpiry.ts";
+import * as EffectWorker from "./EffectWorker.ts";
+import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as RuntimeRequestService from "./RuntimeRequestService.ts";
+import * as RunFinalizationService from "./RunFinalizationService.ts";
+import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
+import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
+import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
+import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
@@ -1335,7 +1349,7 @@ it.effect("rejects approval responses at the four-hour deadline before queuing p
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("persists approval expiry once, hides pending state, and queues only a decline", () =>
+it.effect("preserves approval expiry through decline execution and Pi response echoes", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -1434,6 +1448,12 @@ it.effect("persists approval expiry once, hides pending state, and queues only a
         },
       ],
     });
+    const {
+      request: pendingRequest,
+      node: pendingNode,
+      item: pendingItem,
+    } = yield* projections.getRuntimeResponseContext(threadId, requestId);
+    assert.ok(pendingRequest && pendingNode && pendingItem);
     yield* TestClock.adjust("14399999 millis");
     yield* expiry.sweep;
     assert.equal((yield* projections.getRuntimeRequest(threadId, requestId))?.status, "pending");
@@ -1469,6 +1489,106 @@ it.effect("persists approval expiry once, hides pending state, and queues only a
         },
       ],
     );
+    const replies: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput[] = [];
+    const ingestorLayer = ProviderEventIngestor.layer.pipe(
+      Layer.provide(Layer.succeed(EventSink.EventSinkV2, sink)),
+      Layer.provide(Layer.succeed(ProjectionStore.ProjectionStoreV2, projections)),
+      Layer.provide(IdAllocator.layer),
+      Layer.provide(ThreadCommandExecutor.layer),
+      Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+    );
+    const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2.pipe(
+      Effect.provide(ingestorLayer),
+    );
+    const sessionsLayer = Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+      get: () =>
+        Effect.succeed(
+          Option.some({
+            respondToRuntimeRequest: (
+              response: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput,
+            ) =>
+              Effect.gen(function* () {
+                replies.push(response);
+                const resolvedAt = yield* DateTime.now;
+                // Pi acknowledges a decline as resolved and completes both history records.
+                const events: ProviderAdapter.ProviderAdapterV2Event[] = [
+                  {
+                    type: "runtime_request.updated",
+                    driver: ProviderDriverKind.make("pi"),
+                    threadId,
+                    runtimeRequest: { ...pendingRequest, status: "resolved", resolvedAt },
+                  },
+                  {
+                    type: "node.updated",
+                    driver: ProviderDriverKind.make("pi"),
+                    node: { ...pendingNode, status: "completed", completedAt: resolvedAt },
+                  },
+                  {
+                    type: "turn_item.updated",
+                    driver: ProviderDriverKind.make("pi"),
+                    turnItem: {
+                      ...pendingItem,
+                      status: "completed",
+                      completedAt: resolvedAt,
+                      updatedAt: resolvedAt,
+                    },
+                  },
+                ];
+                for (const event of events) {
+                  yield* ingestor
+                    .ingestNormalized({
+                      threadId,
+                      providerInstanceId: ProviderInstanceId.make("pi"),
+                      providerSessionId: ProviderSessionId.make("sweep-session"),
+                      event,
+                    })
+                    .pipe(Effect.orDie);
+                }
+              }),
+          } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+        ),
+    });
+    const executorLayer = EffectWorker.layerExecutor.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          sessionsLayer,
+          RuntimeRequestService.layer.pipe(
+            Layer.provide(sessionsLayer),
+            Layer.provide(Layer.succeed(ProjectionStore.ProjectionStoreV2, projections)),
+          ),
+          Layer.mock(RunFinalizationService.RunFinalizationService)({}),
+          Layer.mock(CheckpointRollbackService.CheckpointRollbackServiceV2)({}),
+          Layer.mock(ProviderTurnControlService.ProviderTurnControlServiceV2)({}),
+          Layer.mock(ProviderTurnStartService.ProviderTurnStartServiceV2)({}),
+          Layer.mock(ThreadTitleRegenerationService.ThreadTitleRegenerationService)({}),
+          Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+          Layer.mock(ServerSettings.ServerSettingsService)({}),
+        ),
+      ),
+    );
+    yield* TestClock.adjust("1 second");
+    const drained = yield* EffectWorker.OrchestrationEffectWorkerV2.use((worker) =>
+      worker.drain(),
+    ).pipe(
+      Effect.provide(
+        Layer.fresh(
+          EffectWorker.layer.pipe(
+            Layer.provide(executorLayer),
+            Layer.provide(Layer.succeed(EffectOutbox.EffectOutboxV2, outbox)),
+          ),
+        ),
+      ),
+    );
+    assert.equal(drained, 1);
+    const effects = yield* outbox.listByCommandId(
+      CommandId.make(`approval-expiry:${threadId}:${requestId}`),
+    );
+    assert.equal(effects[0]?.status, "succeeded", effects[0]?.lastError ?? undefined);
+    assert.deepEqual(replies, [{ requestId, decision: "decline" }]);
+    const afterResponse = yield* projections.getRuntimeResponseContext(threadId, requestId);
+    assert.deepEqual(afterResponse, context);
+    assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+    assert.isNull((yield* projections.getThreadShell(threadId))?.pendingApprovalRequest);
   }).pipe(
     Effect.provide(
       ApprovalExpiry.layer.pipe(

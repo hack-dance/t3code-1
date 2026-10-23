@@ -1323,6 +1323,99 @@ layer("ProviderEventIngestorV2", (it) => {
       ),
   );
 
+  it.effect.each(["pending", "resolved", "cancelled"] as const)(
+    "preserves expiry committed after a provider %s update was normalized",
+    (status) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const eventSink = yield* EventSink.EventSinkV2;
+          const projections = yield* ProjectionStore.ProjectionStoreV2;
+          const idAllocator = yield* IdAllocator.IdAllocatorV2;
+          const now = yield* DateTime.now;
+          const threadEvent = yield* threadCreatedEvent(now);
+          const threadId = threadEvent.threadId;
+          const providerSessionId = yield* idAllocator.allocate.providerSession({
+            providerInstanceId: modelSelection.instanceId,
+            threadId,
+          });
+          const request: OrchestrationV2RuntimeRequest = {
+            id: RuntimeRequestId.make(`${threadId}:expiry-race`),
+            nodeId: NodeId.make(`${threadId}:expiry-race`),
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "command",
+            status: "pending",
+            responseCapability: { type: "live", providerSessionId },
+            createdAt: now,
+            resolvedAt: null,
+          };
+          yield* eventSink.write({
+            events: [
+              threadEvent,
+              {
+                id: yield* idAllocator.allocate.event({ threadId }),
+                threadId,
+                occurredAt: now,
+                type: "runtime-request.updated",
+                payload: request,
+              },
+            ],
+          });
+          const normalized = yield* Deferred.make<void>();
+          const releaseWrite = yield* Deferred.make<void>();
+          const gatedSink = EventSink.EventSinkV2.of({
+            ...eventSink,
+            write: (input) =>
+              Deferred.succeed(normalized, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseWrite)),
+                Effect.andThen(eventSink.write(input)),
+              ),
+          });
+          const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2.pipe(
+            Effect.provide(Layer.fresh(ProviderEventIngestor.layer)),
+            Effect.provideService(EventSink.EventSinkV2, gatedSink),
+          );
+          const response = yield* ingestor
+            .ingestNormalized({
+              providerSessionId,
+              providerInstanceId: modelSelection.instanceId,
+              threadId,
+              event: {
+                type: "runtime_request.updated",
+                driver: CODEX_DRIVER,
+                runtimeRequest: {
+                  ...request,
+                  status,
+                  resolvedAt: status === "pending" ? null : now,
+                },
+              },
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(normalized);
+          const expired = {
+            ...request,
+            status: "expired" as const,
+            decision: "decline" as const,
+            resolvedAt: now,
+          };
+          yield* eventSink.write({
+            events: [
+              {
+                id: yield* idAllocator.allocate.event({ threadId }),
+                threadId,
+                occurredAt: now,
+                type: "runtime-request.updated",
+                payload: expired,
+              },
+            ],
+          });
+          yield* Deferred.succeed(releaseWrite, undefined);
+          assert.isEmpty(yield* Fiber.join(response));
+          assert.deepEqual(yield* projections.getRuntimeRequest(threadId, request.id), expired);
+        }),
+      ),
+  );
+
   it.effect("persists a failed provider terminal as one expected error item", () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;
