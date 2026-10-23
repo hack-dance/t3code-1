@@ -1,0 +1,10 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # .repos/ holds vendored upstream checkouts with their own lockfiles;
+    # security updates there are not resolvable and are not ours to bump.
+    exclude-paths:
+      - ".repos/**"
