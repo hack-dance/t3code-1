@@ -573,7 +573,11 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ),
   layerThreadPullRequestWorker,
   DelegatedTaskAnalytics.layer,
-  RunEvents.layer.pipe(Layer.provide(ProjectionStoreV2.layer), Layer.provide(ProjectStore.layer)),
+  RunEvents.layer.pipe(
+    Layer.provide(ProjectionStoreV2.layer),
+    Layer.provide(ProjectStore.layer),
+    Layer.provide(RuntimeLayer.layerEventSink),
+  ),
   Layer.effectDiscard(
     Effect.gen(function* () {
       const service = yield* PullRequestSyncReactor.PullRequestSyncReactor;

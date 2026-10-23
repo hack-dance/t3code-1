@@ -8,7 +8,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
-import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -31,7 +31,9 @@ export const layerWithConfig = (config: RunEventsConfig | undefined) =>
     RunEvents,
     Effect.gen(function* () {
       if (!config?.webhook && !config?.command) return RunEvents.of({ onEvent: () => Effect.void });
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      // Recovery commits before activation; retain its events without replaying older history.
+      const afterSequence = yield* eventSink.latestSequence().pipe(Effect.orDie);
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       const projects = yield* ProjectStore.ProjectStoreV2;
       const path = yield* Path.Path;
@@ -151,9 +153,9 @@ export const layerWithConfig = (config: RunEventsConfig | undefined) =>
       );
 
       yield* forkParked(
-        Stream.runForEach(orchestrator.streamDomainEvents, onEvent).pipe(
-          Effect.catchCause(() => Effect.logWarning("Run event subscription stopped.")),
-        ),
+        Stream.runForEach(eventSink.stream({ afterSequence }), (stored) =>
+          onEvent(stored.event),
+        ).pipe(Effect.catchCause(() => Effect.logWarning("Run event subscription stopped."))),
       );
       return RunEvents.of({ onEvent });
     }),

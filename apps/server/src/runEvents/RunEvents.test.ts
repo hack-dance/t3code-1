@@ -1,6 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import { afterEach, describe, vi } from "vite-plus/test";
 import {
+  CommandId,
   MessageId,
   ProjectId,
   ProviderInstanceId,
@@ -26,6 +27,15 @@ import { RunEventsConfig } from "./config.ts";
 import * as Delivery from "./Delivery.ts";
 import { RunEvent, createPayload, lifecycleStatus, workspaceLabel } from "./payload.ts";
 import * as RunEvents from "./RunEvents.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
+import * as ProviderRuntimeRecovery from "../orchestration-v2/ProviderRuntimeRecoveryService.ts";
+import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ServerSettings from "../serverSettings.ts";
+import { ServerActivation } from "../serverActivation.ts";
 
 const decodePayload = Schema.decodeUnknownSync(Schema.fromJsonString(RunEvent));
 
@@ -76,7 +86,10 @@ function event(
 
 const dependencies = Layer.mergeAll(
   Path.layer,
-  Layer.mock(Orchestrator.OrchestratorV2)({ streamDomainEvents: Stream.never }),
+  Layer.mock(EventSink.EventSinkV2)({
+    latestSequence: () => Effect.succeed(0),
+    stream: () => Stream.never,
+  }),
   Layer.mock(ProjectionStore.ProjectionStoreV2)({
     getThread: () =>
       Effect.succeed({
@@ -315,8 +328,16 @@ it.effect(
         Effect.provide(
           RunEvents.layerWithConfig({ command: { ...selection, executable: "hook" } }).pipe(
             Layer.provide(
-              Layer.mock(Orchestrator.OrchestratorV2)({
-                streamDomainEvents: Stream.fromIterable([event("starting"), event("completed")]),
+              Layer.mock(EventSink.EventSinkV2)({
+                latestSequence: () => Effect.succeed(0),
+                stream: () =>
+                  Stream.fromIterable(
+                    [event("starting"), event("completed")].map((event, index) => ({
+                      sequence: index + 1,
+                      commandId: null,
+                      event,
+                    })),
+                  ),
               }),
             ),
             Layer.provide(dependencies),
@@ -604,4 +625,81 @@ it.effect(
         ),
       );
     }).pipe(Effect.scoped),
+);
+
+it.effect("delivers startup recovery after activation without replaying older run events", () =>
+  Effect.gen(function* () {
+    const activation = yield* Deferred.make<void>();
+    const delivered = yield* Deferred.make<RunEvent>();
+    const bodies: RunEvent[] = [];
+    const database = SqlitePersistence.layerMemory;
+    const stores = Layer.mergeAll(ProjectionStore.layer, EffectOutbox.layer).pipe(
+      Layer.provide(database),
+    );
+    const runtime = ProviderReplayHarness.layerWithRegistry(
+      { name: "run-events-recovery" },
+      ProviderAdapterRegistry.layerFromAdapters([]),
+      { databaseLayer: database, runEffectWorker: false },
+    );
+    const recoveryLayer = ProviderRuntimeRecovery.layer.pipe(
+      Layer.provide(Layer.mergeAll(stores, IdAllocator.layer, ServerSettings.layerTest())),
+    );
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-recovery-thread"),
+        threadId: run.threadId,
+        projectId: ProjectId.make("project-a"),
+        title: "Recovery notification",
+        modelSelection: run.modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* sink.write({ events: [event("starting")] });
+      yield* Effect.gen(function* () {
+        yield* RunEvents.RunEvents;
+        const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+        const summary = yield* recovery.recover;
+        expect(summary.terminalizedRuns).toBe(1);
+        expect(bodies).toEqual([]);
+        yield* Deferred.succeed(activation, undefined);
+        const notification = yield* Deferred.await(delivered);
+        expect(notification.status).toBe("cancelled");
+        expect(notification.type).toBe("run.failed");
+        expect(bodies.map(({ status }) => status)).toEqual(["cancelled"]);
+      }).pipe(
+        Effect.provide([
+          recoveryLayer,
+          RunEvents.layerWithConfig({
+            command: { ...selection, executable: "hook" },
+          }).pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                dependencies,
+                Layer.succeed(EventSink.EventSinkV2, sink),
+                Layer.succeed(Delivery.Delivery, {
+                  webhook: () => Effect.void,
+                  command: (_, body) =>
+                    Effect.gen(function* () {
+                      const payload = decodePayload(body);
+                      bodies.push(payload);
+                      yield* Deferred.succeed(delivered, payload);
+                    }),
+                }),
+              ),
+            ),
+          ),
+        ]),
+      );
+    }).pipe(
+      Effect.provide(runtime),
+      Effect.provideService(ServerActivation, Deferred.await(activation)),
+    );
+  }).pipe(Effect.scoped),
 );
