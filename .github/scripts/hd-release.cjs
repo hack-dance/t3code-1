@@ -52,14 +52,29 @@ function assertPublishCoverage(releases, targets) {
   }
 }
 
+/** A published, non-draft HD Nightly already built from this maintenance commit. */
+function publishedRelease(releases, sourceSha) {
+  return releases.find(
+    (release) =>
+      !release.draft &&
+      /^v\d+\.\d+\.\d+-nightly\./.test(release.tag_name) &&
+      (release.target_commitish === sourceSha ||
+        (release.body || "")
+          .split(/\r?\n/)
+          .some((line) => line.trim() === `Maintenance: ${sourceSha}`)),
+  );
+}
+
 /**
  * Head source candidates, newest first: the pinned release only, or every published release
- * of the channel. `resolve` maps a tag to its upstream commit, or null when it is missing.
+ * of the channel. Scheduled publication requires the latest release, so an unresolved sync
+ * cannot silently publish an older base. `resolve` maps a tag to its commit, or null if missing.
  */
-function headCandidates(releases, channel, pinned, resolve) {
-  const ordered = pinned
-    ? [selectRelease(releases, channel, pinned)]
-    : channelReleases(releases, channel);
+function headCandidates(releases, channel, pinned, resolve, requireLatest = false) {
+  const ordered =
+    pinned || requireLatest
+      ? [selectRelease(releases, channel, pinned)]
+      : channelReleases(releases, channel);
   return ordered.map((item) => ({
     tag: item.tag_name,
     sha: resolve(item.tag_name),
@@ -183,6 +198,29 @@ function main() {
     repository: config.repository,
   };
   Fs.writeFileSync("hd-release.json", JSON.stringify(inputs, null, 2) + "\n");
+  // Scheduled runs publish only new maintenance commits. A commit that is already released is
+  // a clean no-op before any upstream or coverage prerequisite can fail the run.
+  if (mode === "publish" && process.env.HD_SKIP_IF_PUBLISHED === "true") {
+    const existing = publishedRelease(
+      JSON.parse(
+        exec("gh", [
+          "api",
+          "--paginate",
+          "--slurp",
+          `repos/${config.repository}/releases?per_page=100`,
+        ]),
+      ).flat(),
+      sourceSha,
+    );
+    if (existing) {
+      const message = `${sourceSha} is already published as ${existing.tag_name}; nothing to publish.`;
+      console.log(message);
+      if (process.env.GITHUB_STEP_SUMMARY)
+        Fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## HD publish skipped\n\n${message}\n`);
+      if (process.env.GITHUB_OUTPUT) Fs.appendFileSync(process.env.GITHUB_OUTPUT, "skip=true\n");
+      return;
+    }
+  }
   const releases = JSON.parse(
     exec("gh", ["api", "--paginate", "--slurp", `repos/${config.upstream}/releases?per_page=100`]),
   ).flat();
@@ -197,18 +235,24 @@ function main() {
       `https://github.com/${config.upstream}.git`,
       "+refs/tags/*:refs/hd-upstream/tags/*",
     ]);
-    const candidates = headCandidates(releases, channel, process.env.HD_UPSTREAM_TAG, (tag) => {
-      try {
-        return exec("git", [
-          "rev-parse",
-          "--verify",
-          "--quiet",
-          `refs/hd-upstream/tags/${tag}^{commit}`,
-        ]);
-      } catch {
-        return null; // A release whose tag is missing upstream cannot be the merged base.
-      }
-    });
+    const candidates = headCandidates(
+      releases,
+      channel,
+      process.env.HD_UPSTREAM_TAG,
+      (tag) => {
+        try {
+          return exec("git", [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            `refs/hd-upstream/tags/${tag}^{commit}`,
+          ]);
+        } catch {
+          return null; // A release whose tag is missing upstream cannot be the merged base.
+        }
+      },
+      process.env.HD_REQUIRE_LATEST_MERGED === "true",
+    );
     const merged = selectMergedRelease({ sourceDir: process.cwd(), sourceSha, candidates });
     release = merged.release;
     commit = { sha: merged.sha };
@@ -303,6 +347,7 @@ module.exports = {
   releaseVersion,
   prepareCandidate,
   assertPublishCoverage,
+  publishedRelease,
 };
 if (require.main === module) {
   try {

@@ -35,10 +35,16 @@ exact upstream release tag. Both upstream bases ship on the HD Nightly train.
   that overlay is linear, so it stops once `hd/nightly` contains an upstream merge,
   and the push fails whenever upstream changed a workflow file.
 
+Scheduled runs publish every six hours only when the newest upstream Nightly is
+already merged into the maintenance commit. An unmerged release or failed source
+preparation stops the run before building or publishing. A maintenance commit
+that is already released as an HD Nightly is skipped cleanly without building.
+Signing and publication gates still apply.
+
 Modes:
 
 - `check` reports the newest published upstream release without building or
-  changing branches. Scheduled runs do this every six hours.
+  changing branches.
 - `candidate` runs checks and uploads test builds as workflow artifacts. `pilot`
   builds macOS arm64 and Linux x64; `all` also builds macOS x64, Linux arm64, and
   both Windows architectures. Candidates use preview versions and have no update
@@ -51,7 +57,7 @@ Modes:
   environment if publication should require approval.
 
 The workflow must exist on the fork's default branch for manual dispatch and
-scheduled checks to be available. Use `hd/nightly` as the default branch while
+scheduled releases to be available. Use `hd/nightly` as the default branch while
 keeping `main` as the upstream mirror. GitHub may require enabling Actions in a
 new fork before its first run. The inherited upstream release workflow is disabled
 in the HD fork.
@@ -105,7 +111,7 @@ The packaged product name does change, which moves a few install paths on the
 first HD build that carries the rebrand:
 
 - macOS: the executable inside the bundle becomes `Contents/MacOS/Hack the
-Planet`. An in-place update keeps the existing bundle folder name (for example
+  Planet`. An in-place update keeps the existing bundle folder name (for example
   `T3 Code (Nightly).app`); a fresh DMG install is `Hack the Planet.app` and
   leaves any older bundle in place, so remove the old one by hand.
 - Linux deb: the install directory moves from `/opt/T3 Code (Nightly)` to
