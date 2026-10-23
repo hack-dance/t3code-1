@@ -193,7 +193,7 @@ const PendingRequestReadTool = Tool.make("t3_pending_request_read", {
 const PendingRequestRespondTool = Tool.make("t3_pending_request_respond", {
   ...commandTool,
   description:
-    "Respond to a pending runtime request using the existing runtime response command. Send answers only for user_input, or decision only for approvals: accept, acceptForSession, acceptAlways, decline, cancel. Granting approvals requires a live full-access/default calling thread or a full-access client. Read the request before approving it. Optional expectRequestKind guards against a kind mismatch. Unknown, non-pending, non-resumable, and approvals at least four hours old are rejected.",
+    "Respond to a pending runtime request using the existing runtime response command. Send answers only for user_input, or decision only for approvals: accept, acceptForSession, acceptAlways, decline, cancel. Granting approvals requires a live full-access/default calling thread or a full-access client. Read the request before approving it. Optional expectRequestKind guards against a kind mismatch. Unknown, non-pending, and non-resumable requests are rejected. Approvals at least four hours old can only be declined or cancelled.",
   parameters: Schema.Struct({
     ...requestTarget,
     answers: Schema.optional(ProviderUserInputAnswers),

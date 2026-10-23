@@ -73,12 +73,6 @@ const readPendingRequest = Effect.fn("mcp.readQuestion")(function* (input: {
           ? "The user-input request was already answered."
           : `The runtime request is no longer pending (${request.status}).`,
     });
-  const expiresAt = approvalRequestExpiresAt(request);
-  if (expiresAt !== null && DateTime.toEpochMillis(yield* DateTime.now) >= expiresAt)
-    return yield* new OrchestratorMcpFailure({
-      code: "invalid_request",
-      message: "This approval expired after 4 hours. Request a new approval in the thread.",
-    });
   const item = context.projection.turnItems.find(
     (item) =>
       (item.type === "user_input_request" || item.type === "approval_request") &&
@@ -224,12 +218,8 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   t3_pending_request_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const { projection } = yield* readThread(input.threadId, ["runtimeRequests"]);
-      const now = DateTime.toEpochMillis(yield* DateTime.now);
       const requests = projection.runtimeRequests
-        .filter((request) => {
-          const expiresAt = approvalRequestExpiresAt(request);
-          return request.status === "pending" && (expiresAt === null || now < expiresAt);
-        })
+        .filter((request) => request.status === "pending")
         .map(({ id, kind }) => ({ id, kind }));
       return {
         requestIds: requests.map(({ id }) => id),
@@ -259,6 +249,18 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     Effect.gen(function* () {
       const context = yield* readPendingRequest(input);
       const { threads, projection, request } = context;
+      const expiresAt = approvalRequestExpiresAt(request);
+      if (
+        expiresAt !== null &&
+        DateTime.toEpochMillis(yield* DateTime.now) >= expiresAt &&
+        input.decision !== "decline" &&
+        input.decision !== "cancel"
+      )
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message:
+            "This approval expired after 4 hours. Decline or cancel it, then request a new approval in the thread.",
+        });
       if (input.expectRequestKind !== undefined && input.expectRequestKind !== request.kind)
         return yield* new OrchestratorMcpFailure({
           code: "invalid_request",

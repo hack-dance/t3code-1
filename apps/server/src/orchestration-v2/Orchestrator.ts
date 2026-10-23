@@ -7663,11 +7663,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       const now = yield* DateTime.now;
       const expiresAt = approvalRequestExpiresAt(runtimeRequest);
-      if (expiresAt !== null && DateTime.toEpochMillis(now) >= expiresAt) {
+      if (
+        expiresAt !== null &&
+        DateTime.toEpochMillis(now) >= expiresAt &&
+        command.decision !== "decline" &&
+        command.decision !== "cancel"
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
-          cause: "This approval expired after 4 hours. Request a new approval in the thread.",
+          cause:
+            "This approval expired after 4 hours. Decline or cancel it, then request a new approval in the thread.",
         });
       }
       if (runtimeRequest.responseCapability.type === "not_resumable") {

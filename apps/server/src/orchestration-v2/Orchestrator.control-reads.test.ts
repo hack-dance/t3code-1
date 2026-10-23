@@ -59,7 +59,7 @@ const layerTest = Layer.mergeAll(
   ),
 );
 
-it.effect("rejects overdue and already resolved approvals before committing response effects", () =>
+it.effect("rejects overdue grants and duplicate responses while allowing overdue rejections", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -101,26 +101,26 @@ it.effect("rejects overdue and already resolved approvals before committing resp
     });
     for (const kind of ProviderRequestKind.literals) {
       for (const age of [4 * 60 * 60 * 1000 - 1, 4 * 60 * 60 * 1000, 4 * 60 * 60 * 1000 + 1]) {
-        const requestId = RuntimeRequestId.make(`request:${kind}:${age}`);
-        const request = {
-          id: requestId,
-          nodeId: NodeId.make(`node:${kind}:${age}`),
-          providerTurnId: null,
-          nativeRequestRef: null,
-          kind,
-          status: "pending" as const,
-          responseCapability: { type: "live" as const, providerSessionId: sessionId },
-          createdAt: DateTime.makeUnsafe(DateTime.toEpochMillis(now) - age),
-          resolvedAt: null,
-        };
-        yield* projections.apply({
-          id: EventId.make(`seed:${requestId}`),
-          type: "runtime-request.updated",
-          threadId,
-          occurredAt: now,
-          payload: request,
-        });
         for (const decision of ProviderApprovalDecision.literals) {
+          const requestId = RuntimeRequestId.make(`request:${kind}:${age}:${decision}`);
+          const request = {
+            id: requestId,
+            nodeId: NodeId.make(`node:${kind}:${age}`),
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind,
+            status: "pending" as const,
+            responseCapability: { type: "live" as const, providerSessionId: sessionId },
+            createdAt: DateTime.makeUnsafe(DateTime.toEpochMillis(now) - age),
+            resolvedAt: null,
+          };
+          yield* projections.apply({
+            id: EventId.make(`seed:${requestId}`),
+            type: "runtime-request.updated",
+            threadId,
+            occurredAt: now,
+            payload: request,
+          });
           const commandId = CommandId.make(`respond:${requestId}:${decision}`);
           const sequence = yield* orchestrator.getThreadEventSequence(threadId);
           const result = yield* orchestrator
@@ -132,13 +132,25 @@ it.effect("rejects overdue and already resolved approvals before committing resp
               decision,
             })
             .pipe(Effect.result);
-          if (age < 4 * 60 * 60 * 1000 && decision === ProviderApprovalDecision.literals[0]) {
+          if (age < 4 * 60 * 60 * 1000 || decision === "decline" || decision === "cancel") {
             assert.isTrue(Result.isSuccess(result));
             assert.equal(
               (yield* projections.getRuntimeRequest(threadId, requestId))?.status,
               "resolved",
             );
             assert.equal((yield* outbox.listByCommandId(commandId)).length, 1);
+            const duplicateCommandId = CommandId.make(`duplicate:${requestId}`);
+            const duplicate = yield* orchestrator
+              .dispatch({
+                type: "runtime-request.respond",
+                commandId: duplicateCommandId,
+                threadId,
+                requestId,
+                decision,
+              })
+              .pipe(Effect.result);
+            assert.isTrue(Result.isFailure(duplicate));
+            assert.deepEqual(yield* outbox.listByCommandId(duplicateCommandId), []);
           } else {
             assert.isTrue(Result.isFailure(result));
             assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);

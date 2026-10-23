@@ -386,47 +386,53 @@ it.effect("requires full-access client authority to grant approvals", () => {
   }).pipe(Effect.provide(harness.layer));
 });
 
-it.effect(
-  "rejects overdue approvals at four hours before the expiry sweep without expiring questions",
-  () => {
-    const harness = pendingRequestHarness();
-    return Effect.gen(function* () {
-      yield* TestClock.setTime(DateTime.toEpochMillis(harness.requests[0]!.createdAt));
-      yield* TestClock.adjust(APPROVAL_REQUEST_TTL_MS - 1);
-      const before = yield* callPendingTool("t3_pending_request_respond", {
-        requestId: "request:permission",
-        decision: "accept",
+it.effect("keeps overdue approvals discoverable and rejectable while refusing grants", () => {
+  const harness = pendingRequestHarness();
+  return Effect.gen(function* () {
+    yield* TestClock.setTime(DateTime.toEpochMillis(harness.requests[0]!.createdAt));
+    yield* TestClock.adjust(APPROVAL_REQUEST_TTL_MS - 1);
+    const before = yield* callPendingTool("t3_pending_request_respond", {
+      requestId: "request:permission",
+      decision: "accept",
+    });
+    expect(before.isError).not.toBe(true);
+    expect(harness.dispatched).toHaveLength(1);
+    yield* TestClock.adjust(1);
+    for (const kind of ProviderRequestKind.literals) {
+      const read = yield* callPendingTool("t3_pending_request_read", {
+        requestId: `request:${kind}`,
       });
-      expect(before.isError).not.toBe(true);
-      expect(harness.dispatched).toHaveLength(1);
-      yield* TestClock.adjust(1);
-      for (const kind of ProviderRequestKind.literals) {
-        for (const name of ["t3_pending_request_read", "t3_pending_request_respond"]) {
-          const result = yield* callPendingTool(name, {
-            requestId: `request:${kind}`,
-            ...(name === "t3_pending_request_respond" ? { decision: "accept" } : {}),
-          });
-          expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
-        }
+      expect(read.isError).not.toBe(true);
+      for (const decision of ["accept", "acceptForSession", "acceptAlways"] as const) {
+        const result = yield* callPendingTool("t3_pending_request_respond", {
+          requestId: `request:${kind}`,
+          decision,
+        });
+        expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
       }
-      expect(harness.dispatched).toHaveLength(1);
-      const list = yield* callPendingTool("t3_pending_request_list");
-      expect(list.structuredContent).toEqual({
-        requestIds: ["request:user_input", "request:auth_refresh"],
-        requests: [
-          { id: "request:user_input", kind: "user_input" },
-          { id: "request:auth_refresh", kind: "auth_refresh" },
-        ],
-      });
-      const answer = yield* callPendingTool("t3_pending_request_respond", {
-        requestId: "request:user_input",
-        answers: { size: "large" },
-      });
-      expect(answer.isError).not.toBe(true);
-      expect(harness.dispatched).toHaveLength(2);
-    }).pipe(Effect.provide(harness.layer));
-  },
-);
+    }
+    expect(harness.dispatched).toHaveLength(1);
+    const list = yield* callPendingTool("t3_pending_request_list");
+    expect(list.structuredContent).toEqual({
+      requestIds: harness.requests.map(({ id }) => id),
+      requests: harness.requests.map(({ id, kind }) => ({ id, kind })),
+    });
+    const answer = yield* callPendingTool("t3_pending_request_respond", {
+      requestId: "request:user_input",
+      answers: { size: "large" },
+    });
+    expect(answer.isError).not.toBe(true);
+    expect(harness.dispatched).toHaveLength(2);
+    for (const kind of ProviderRequestKind.literals) {
+      for (const decision of ["decline", "cancel"] as const) {
+        const response = { requestId: `request:${kind}`, decision };
+        const result = yield* callPendingTool("t3_pending_request_respond", response);
+        expect(result.isError).not.toBe(true);
+        expect(harness.dispatched.at(-1)).toMatchObject(response);
+      }
+    }
+  }).pipe(Effect.provide(harness.layer));
+});
 
 const threadId = ThreadId.make("mcp-core-thread");
 const scope: McpInvocationContext.McpInvocationScope = {
