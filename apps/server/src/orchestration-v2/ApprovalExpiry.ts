@@ -39,7 +39,7 @@ const make = Effect.gen(function* () {
     threadId: ThreadId,
     requestId: RuntimeRequestId,
   ) {
-    // Responses use this same lock. Re-read so a sweep cannot overwrite an accepted request.
+    // Serialize client responses; provider responses are guarded in the sink transaction.
     yield* executor.withLock(
       threadId,
       Effect.gen(function* () {
@@ -91,6 +91,7 @@ const make = Effect.gen(function* () {
             },
           });
         yield* sink.writeWithEffects({
+          onlyIfRuntimeRequestPending: { threadId, requestId },
           commandId,
           events,
           // Decline the suspended provider callback so expiry does not leave the agent stuck.

@@ -78,6 +78,11 @@ export interface EventSinkV2Shape {
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeWithEffects: (input: {
+    /** Skip the entire batch and its effects if this request is no longer pending at commit time. */
+    readonly onlyIfRuntimeRequestPending?: {
+      readonly threadId: ThreadId;
+      readonly requestId: RuntimeRequestId;
+    };
     /**
      * Rebuilds each run.updated from the stored row with only its delegatedCompletion replaced.
      * The batch must not also change that run's lifecycle.
@@ -427,6 +432,14 @@ const layerBase: Layer.Layer<
 
       const { committed } = yield* commitThenPublish(
         Effect.gen(function* () {
+          const pending = input.onlyIfRuntimeRequestPending;
+          if (pending !== undefined) {
+            const current = yield* projectionStore.getRuntimeRequest(
+              pending.threadId,
+              pending.requestId,
+            );
+            if (current?.status !== "pending") return { committed: [], outcomes: [] };
+          }
           // Check ownership in the same transaction that claims the native session.
           const imported = input.unlessNativeThreadOwned;
           if (imported?.nativeThreadRef != null) {
