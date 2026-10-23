@@ -37,6 +37,22 @@ function ApprovalsPage() {
   const selectedProject = projects.find(
     (entry) => JSON.stringify([entry.environmentId, entry.id]) === project,
   );
+  const hostItems = [
+    { value: "all", label: "All hosts" },
+    ...environments.map((environment) => ({
+      value: environment.environmentId,
+      label: environment.label,
+    })),
+  ];
+  const projectItems = [
+    { value: "all", label: "All projects" },
+    ...projects
+      .filter((entry) => host === "all" || entry.environmentId === host)
+      .map((entry) => ({
+        value: JSON.stringify([entry.environmentId, entry.id]),
+        label: entry.title,
+      })),
+  ];
   const visible =
     project !== "all" && selectedProject === undefined
       ? []
@@ -59,6 +75,7 @@ function ApprovalsPage() {
         </p>
         <div className="flex flex-wrap gap-3">
           <Select
+            items={hostItems}
             value={host}
             onValueChange={(value) => {
               setHost(value ?? "all");
@@ -69,30 +86,27 @@ function ApprovalsPage() {
               <SelectValue />
             </SelectTrigger>
             <SelectPopup>
-              <SelectItem value="all">All hosts</SelectItem>
-              {environments.map((environment) => (
-                <SelectItem key={environment.environmentId} value={environment.environmentId}>
-                  {environment.label}
+              {hostItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
                 </SelectItem>
               ))}
             </SelectPopup>
           </Select>
-          <Select value={project} onValueChange={(value) => setProject(value ?? "all")}>
+          <Select
+            items={projectItems}
+            value={project}
+            onValueChange={(value) => setProject(value ?? "all")}
+          >
             <SelectTrigger aria-label="Filter by project">
               <SelectValue />
             </SelectTrigger>
             <SelectPopup>
-              <SelectItem value="all">All projects</SelectItem>
-              {projects
-                .filter((entry) => host === "all" || entry.environmentId === host)
-                .map((entry) => (
-                  <SelectItem
-                    key={JSON.stringify([entry.environmentId, entry.id])}
-                    value={JSON.stringify([entry.environmentId, entry.id])}
-                  >
-                    {entry.title}
-                  </SelectItem>
-                ))}
+              {projectItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
             </SelectPopup>
           </Select>
         </div>
