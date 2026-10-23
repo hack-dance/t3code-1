@@ -1344,6 +1344,7 @@ it.effect("persists approval expiry once, hides pending state, and queues only a
     const threadId = ThreadId.make("thread:approval-sweep");
     const requestId = RuntimeRequestId.make("approval-sweep");
     const nodeId = NodeId.make("approval-sweep-node");
+    const runId = RunId.make("approval-sweep-run");
     const now = yield* DateTime.now;
     yield* orchestrator.dispatch({
       type: "thread.create",
@@ -1362,6 +1363,29 @@ it.effect("persists approval expiry once, hides pending state, and queues only a
     const sink = yield* EventSink.EventSinkV2;
     yield* sink.write({
       events: [
+        {
+          id: EventId.make("approval-sweep-node"),
+          type: "node.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: nodeId,
+            threadId,
+            runId,
+            parentNodeId: null,
+            rootNodeId: nodeId,
+            kind: "approval_request",
+            status: "waiting",
+            countsForRun: false,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            runtimeRequestId: requestId,
+            checkpointScopeId: null,
+            startedAt: now,
+            completedAt: null,
+          },
+        },
         {
           id: EventId.make("approval-sweep-request"),
           type: "runtime-request.updated",
@@ -1419,7 +1443,16 @@ it.effect("persists approval expiry once, hides pending state, and queues only a
     assert.equal(context.request?.status, "expired");
     assert.equal(context.item?.title, "Approval expired after 4 hours");
     assert.equal(context.item?.status, "cancelled");
+    assert.equal(context.node?.status, "cancelled");
     assert.isNull((yield* projections.getThreadShell(threadId))?.pendingRuntimeRequest);
+    assert.isNull((yield* projections.getThreadShell(threadId))?.pendingApprovalRequest);
+    const expiredEvents = yield* sink
+      .readByCommandId({
+        commandId: CommandId.make(`approval-expiry:${threadId}:${requestId}`),
+      })
+      .pipe(Stream.runCollect);
+    assert.lengthOf(expiredEvents, 3);
+    assert.isTrue(expiredEvents.every(({ event }) => event.runId === runId));
     const sequence = yield* orchestrator.getThreadEventSequence(threadId);
     yield* expiry.sweep;
     assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
@@ -1444,4 +1477,81 @@ it.effect("persists approval expiry once, hides pending state, and queues only a
       ),
     ),
   ),
+);
+
+it.effect("continues expiring later approvals when one candidate cannot be read", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const threadId = ThreadId.make("thread:approval-sweep-isolation");
+    const failedId = RuntimeRequestId.make("approval:0-failed");
+    const nextId = RuntimeRequestId.make("approval:1-next");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-approval-sweep-isolation"),
+      threadId,
+      projectId: ProjectId.make("project:approval-sweep-isolation"),
+      title: "Approval sweep isolation",
+      modelSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* sink.write({
+      events: [failedId, nextId].map((id) => ({
+        id: EventId.make(`event:${id}`),
+        type: "runtime-request.updated" as const,
+        threadId,
+        occurredAt: now,
+        payload: {
+          id,
+          nodeId: NodeId.make(`node:${id}`),
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "command" as const,
+          status: "pending" as const,
+          responseCapability: {
+            type: "live" as const,
+            providerSessionId: ProviderSessionId.make("session:isolation"),
+          },
+          createdAt: now,
+          resolvedAt: null,
+        },
+      })),
+    });
+    yield* TestClock.adjust("4 hours");
+    yield* Effect.gen(function* () {
+      const expiry = yield* ApprovalExpiry.ApprovalExpiry;
+      yield* expiry.sweep;
+      yield* expiry.sweep;
+    }).pipe(
+      Effect.provide(
+        ApprovalExpiry.layer.pipe(
+          Layer.provide([
+            Layer.succeed(ProjectionStore.ProjectionStoreV2, {
+              ...projections,
+              getRuntimeResponseContext: (thread, request) =>
+                request === failedId
+                  ? Effect.fail(new ProjectionStore.ProjectionStoreReadError({ threadId: thread }))
+                  : projections.getRuntimeResponseContext(thread, request),
+            }),
+            Layer.succeed(EventSink.EventSinkV2, sink),
+            ThreadCommandExecutor.layer,
+          ]),
+        ),
+      ),
+    );
+    assert.equal((yield* projections.getRuntimeRequest(threadId, failedId))?.status, "pending");
+    assert.equal((yield* projections.getRuntimeRequest(threadId, nextId))?.status, "expired");
+    assert.lengthOf(
+      yield* outbox.listByCommandId(CommandId.make(`approval-expiry:${threadId}:${nextId}`)),
+      1,
+    );
+  }).pipe(Effect.provide(layerTest)),
 );

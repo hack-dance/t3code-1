@@ -44,6 +44,33 @@ describe("V2 client presentation", () => {
         .pendingApproval,
     ).toBeNull();
   });
+  it("keeps an approval visible alongside a newer question", () => {
+    const createdAt = v2ThreadShell.updatedAt;
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      pendingApprovalRequest: { id: RuntimeRequestId.make("approval"), kind: "command", createdAt },
+      pendingRuntimeRequest: {
+        id: RuntimeRequestId.make("question"),
+        kind: "user_input",
+        createdAt: DateTime.add(createdAt, { seconds: 1 }),
+      },
+    });
+    expect(shell.hasPendingApprovals).toBe(true);
+    expect(shell.hasPendingUserInput).toBe(true);
+    expect(shell.pendingApproval?.expiresAt).toBe(DateTime.toEpochMillis(createdAt) + 14_400_000);
+    expect(
+      presentThreadShell(environmentId, {
+        ...v2ThreadShell,
+        pendingApprovalRequest: null,
+        pendingRuntimeRequest: {
+          id: RuntimeRequestId.make("old-approval"),
+          kind: "command",
+          createdAt,
+        },
+      }).pendingApproval,
+    ).toBeNull();
+  });
+
   it("keeps async questions in Working until the run completes", () => {
     const runId = RunId.make("run-async-question");
     const running = {

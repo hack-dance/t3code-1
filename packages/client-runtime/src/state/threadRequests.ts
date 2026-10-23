@@ -225,9 +225,9 @@ export function filterApprovalThreads<
     readonly projectId?: string;
     readonly nowMs: number;
   },
-): T[] {
+): Array<T & { readonly pendingApproval: { readonly expiresAt: number } }> {
   return threads.filter(
-    (thread) =>
+    (thread): thread is T & { readonly pendingApproval: { readonly expiresAt: number } } =>
       scope.environmentIds.has(thread.environmentId) &&
       (scope.environmentId === undefined || thread.environmentId === scope.environmentId) &&
       (scope.projectId === undefined || thread.projectId === scope.projectId) &&

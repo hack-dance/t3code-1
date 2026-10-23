@@ -255,10 +255,12 @@ export function presentThreadShell(
   pendingSubagentRequest: PendingSubagentRequest | null = null,
 ): EnvironmentThreadShell {
   const updatedAt = iso(thread.updatedAt);
+  const pendingApproval =
+    thread.pendingApprovalRequest === undefined
+      ? thread.pendingRuntimeRequest
+      : thread.pendingApprovalRequest;
   const approvalExpiresAt =
-    thread.pendingRuntimeRequest === null
-      ? null
-      : approvalRequestExpiresAt(thread.pendingRuntimeRequest);
+    pendingApproval === null ? null : approvalRequestExpiresAt(pendingApproval);
   const latestRun =
     thread.latestRunId === null
       ? null

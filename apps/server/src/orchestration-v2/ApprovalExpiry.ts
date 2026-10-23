@@ -50,7 +50,18 @@ const make = Effect.gen(function* () {
         const deadline = approvalRequestExpiresAt(request);
         if (deadline === null || deadline > DateTime.toEpochMillis(now)) return;
         const commandId = CommandId.make(`approval-expiry:${threadId}:${requestId}`);
-        const base = { threadId, nodeId: request.nodeId, occurredAt: now };
+        const base = {
+          threadId,
+          nodeId: request.nodeId,
+          ...(context.node?.runId == null ? {} : { runId: context.node.runId }),
+          ...(context.session === undefined
+            ? {}
+            : {
+                driver: context.session.driver,
+                providerInstanceId: context.session.providerInstanceId,
+              }),
+          occurredAt: now,
+        };
         const events: OrchestrationV2DomainEvent[] = [
           {
             ...base,
@@ -107,7 +118,15 @@ const make = Effect.gen(function* () {
     sweep: Effect.gen(function* () {
       const now = yield* DateTime.now;
       const candidates = yield* projections.getExpiredApprovalCandidates(now);
-      for (const candidate of candidates) yield* expire(candidate.threadId, candidate.requestId);
+      for (const candidate of candidates)
+        yield* expire(candidate.threadId, candidate.requestId).pipe(
+          Effect.catchCause(() =>
+            Effect.logWarning("orchestration-v2.approval-expiry.failed", {
+              threadId: candidate.threadId,
+              requestId: candidate.requestId,
+            }),
+          ),
+        );
     }).pipe(Effect.mapError((cause) => new ApprovalExpiryError({ cause }))),
   });
 });

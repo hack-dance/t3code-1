@@ -123,7 +123,7 @@ function ApprovalsPage() {
                   }
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  Pending · Expires {new Date(thread.pendingApproval!.expiresAt).toLocaleString()}
+                  Pending · Expires {new Date(thread.pendingApproval.expiresAt).toLocaleString()}
                 </p>
                 <Link
                   to="/$environmentId/$threadId"
