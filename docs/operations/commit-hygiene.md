@@ -1,7 +1,8 @@
 # Commit hygiene
 
 The `Commit hygiene` workflow checks PRs targeting `hd/nightly` and pushes to that
-branch. It scans `base..head` with gitleaks v8.30.1, including merged side branches.
+branch. It scans `base..head` with gitleaks v8.30.1, including merged side branches
+and merge patches (`-m`) so conflict-resolution additions are checked.
 The release archive must match the SHA-256 pinned in the workflow before it runs.
 Findings are redacted; diagnostics are not enabled.
 
@@ -22,10 +23,16 @@ must first have that history integrated into `hd/nightly` or use the push policy
 
 Missing range endpoints (including an all-zero endpoint for branch creation or
 deletion) fail closed. The workflow checks out full history and does not substitute
-the latest branch tip for an unavailable event SHA.
+the latest branch tip for an unavailable event SHA. The public fork is fetched
+anonymously, without storing credentials. This avoids recursive credential cleanup
+in `actions/checkout`, which fails on vendored gitlinks that lack `.gitmodules`
+entries. The fetch has no depth limit and checkout uses the event's head SHA.
 
 Run the focused email-policy fixtures with
 `bash .github/scripts/check-commit-emails.test.sh`. They create an isolated Git
 repository under the worktree's ignored `.generated` directory and remove it when
-finished. Workflow changes also need YAML/actionlint validation and
+finished. Run `bash .github/scripts/commit-hygiene.test.sh <verified-gitleaks-path>`
+to verify anonymous checkout with malformed gitlinks and detection of an inert
+marker introduced only in a merge commit. Both fixture suites also run in CI.
+Workflow changes also need YAML/actionlint validation and
 `vp run check:changed origin/hd/nightly` when the repository toolchain is available.

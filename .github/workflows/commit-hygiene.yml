@@ -17,10 +17,21 @@ jobs:
       BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.after }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+      # This public repository needs no checkout credentials. Avoid checkout's
+      # recursive auth cleanup, which fails on vendored gitlinks without URLs.
+      - name: Fetch full history without credentials
+        env:
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_TERMINAL_PROMPT: '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git init .
+          git remote add origin https://github.com/hack-dance/t3code-1.git
+          git -c credential.helper= fetch --no-tags --no-recurse-submodules origin "$BASE_SHA" "$HEAD_SHA"
+          git checkout --detach "$HEAD_SHA"
       - name: Validate range and commit emails
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -38,12 +49,12 @@ jobs:
             --output gitleaks.tar.gz
           echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz' | sha256sum --check --strict
           tar -xzf gitleaks.tar.gz gitleaks
+      - name: Test commit hygiene regressions
+        if: ${{ !cancelled() && steps.gitleaks.outcome == 'success' }}
+        run: |
+          bash .github/scripts/check-commit-emails.test.sh
+          bash .github/scripts/commit-hygiene.test.sh "$RUNNER_TEMP/gitleaks/gitleaks"
       - name: Scan every new commit for secrets
         if: ${{ !cancelled() && steps.gitleaks.outcome == 'success' }}
         shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-          git cat-file -e "$BASE_SHA^{commit}"
-          git cat-file -e "$HEAD_SHA^{commit}"
-          "$RUNNER_TEMP/gitleaks/gitleaks" git --redact --log-opts="$BASE_SHA..$HEAD_SHA"
+        run: bash .github/scripts/scan-commit-secrets.sh "$BASE_SHA" "$HEAD_SHA" "$RUNNER_TEMP/gitleaks/gitleaks"
