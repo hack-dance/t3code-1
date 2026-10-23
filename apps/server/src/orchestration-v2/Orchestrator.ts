@@ -18,6 +18,7 @@ import {
 } from "@t3tools/shared/threadPullRequests";
 import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+  approvalRequestExpiresAt,
   type ChatAttachment,
   CommandId,
   isOrchestrationV2WorkActive,
@@ -7660,6 +7661,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Runtime request ${command.requestId} is ${runtimeRequest.status}.`,
         });
       }
+      const now = yield* DateTime.now;
+      const expiresAt = approvalRequestExpiresAt(runtimeRequest);
+      if (expiresAt !== null && DateTime.toEpochMillis(now) >= expiresAt) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This approval expired after 4 hours. Request a new approval in the thread.",
+        });
+      }
       if (runtimeRequest.responseCapability.type === "not_resumable") {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -7690,7 +7700,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
       }
 
-      const now = yield* DateTime.now;
       const resolvedRequest = {
         ...runtimeRequest,
         status: "resolved" as const,

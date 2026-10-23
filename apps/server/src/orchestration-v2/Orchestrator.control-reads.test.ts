@@ -9,6 +9,8 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderApprovalDecision,
+  ProviderRequestKind,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -55,6 +57,100 @@ const layerTest = Layer.mergeAll(
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
     { databaseLayer: layerDatabase, runEffectWorker: false },
   ),
+);
+
+it.effect("rejects overdue and already resolved approvals before committing response effects", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const threadId = ThreadId.make("thread:approval-response-deadline");
+    const sessionId = ProviderSessionId.make("session:approval-response-deadline");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-approval-response-deadline"),
+      threadId,
+      projectId: ProjectId.make("project:approval-response-deadline"),
+      title: "Approval deadline",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* projections.apply({
+      id: EventId.make("attach-approval-response-deadline"),
+      type: "provider-session.attached",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: sessionId,
+        driver: adapter.driver,
+        providerInstanceId: instanceId,
+        status: "ready",
+        cwd: "/repo",
+        model: modelSelection.model,
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+      },
+    });
+    for (const kind of ProviderRequestKind.literals) {
+      for (const age of [4 * 60 * 60 * 1000 - 1, 4 * 60 * 60 * 1000, 4 * 60 * 60 * 1000 + 1]) {
+        const requestId = RuntimeRequestId.make(`request:${kind}:${age}`);
+        const request = {
+          id: requestId,
+          nodeId: NodeId.make(`node:${kind}:${age}`),
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind,
+          status: "pending" as const,
+          responseCapability: { type: "live" as const, providerSessionId: sessionId },
+          createdAt: DateTime.makeUnsafe(DateTime.toEpochMillis(now) - age),
+          resolvedAt: null,
+        };
+        yield* projections.apply({
+          id: EventId.make(`seed:${requestId}`),
+          type: "runtime-request.updated",
+          threadId,
+          occurredAt: now,
+          payload: request,
+        });
+        for (const decision of ProviderApprovalDecision.literals) {
+          const commandId = CommandId.make(`respond:${requestId}:${decision}`);
+          const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+          const result = yield* orchestrator
+            .dispatch({
+              type: "runtime-request.respond",
+              commandId,
+              threadId,
+              requestId,
+              decision,
+            })
+            .pipe(Effect.result);
+          if (age < 4 * 60 * 60 * 1000 && decision === ProviderApprovalDecision.literals[0]) {
+            assert.isTrue(Result.isSuccess(result));
+            assert.equal(
+              (yield* projections.getRuntimeRequest(threadId, requestId))?.status,
+              "resolved",
+            );
+            assert.equal((yield* outbox.listByCommandId(commandId)).length, 1);
+          } else {
+            assert.isTrue(Result.isFailure(result));
+            assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+            assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+            if (age >= 4 * 60 * 60 * 1000) {
+              assert.deepEqual(yield* projections.getRuntimeRequest(threadId, requestId), request);
+            }
+          }
+        }
+      }
+    }
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("marks a never-visited thread's first completion unread", () =>

@@ -1,4 +1,5 @@
 import {
+  approvalRequestExpiresAt,
   type CommandId,
   type RuntimeRequestId,
   ThreadId,
@@ -8,10 +9,12 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
+  assertFullAccess,
   dispatchFailure,
   newCommandId,
   readCaller,
@@ -69,6 +72,12 @@ const readPendingRequest = Effect.fn("mcp.readQuestion")(function* (input: {
         request.kind === "user_input" && request.status === "resolved"
           ? "The user-input request was already answered."
           : `The runtime request is no longer pending (${request.status}).`,
+    });
+  const expiresAt = approvalRequestExpiresAt(request);
+  if (expiresAt !== null && DateTime.toEpochMillis(yield* DateTime.now) >= expiresAt)
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message: "This approval expired after 4 hours. Request a new approval in the thread.",
     });
   const item = context.projection.turnItems.find(
     (item) =>
@@ -215,8 +224,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   t3_pending_request_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const { projection } = yield* readThread(input.threadId, ["runtimeRequests"]);
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
       const requests = projection.runtimeRequests
-        .filter((request) => request.status === "pending")
+        .filter((request) => {
+          const expiresAt = approvalRequestExpiresAt(request);
+          return request.status === "pending" && (expiresAt === null || now < expiresAt);
+        })
         .map(({ id, kind }) => ({ id, kind }));
       return {
         requestIds: requests.map(({ id }) => id),
@@ -244,7 +257,8 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_pending_request_respond: writesThread((input) =>
     Effect.gen(function* () {
-      const { threads, projection, request } = yield* readPendingRequest(input);
+      const context = yield* readPendingRequest(input);
+      const { threads, projection, request } = context;
       if (input.expectRequestKind !== undefined && input.expectRequestKind !== request.kind)
         return yield* new OrchestratorMcpFailure({
           code: "invalid_request",
@@ -266,6 +280,16 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           code: "invalid_request",
           message: "Approval requests require a decision and do not accept answers.",
         });
+      }
+      if (
+        input.decision === "accept" ||
+        input.decision === "acceptForSession" ||
+        input.decision === "acceptAlways"
+      ) {
+        yield* assertFullAccess(
+          context,
+          "Granting approvals needs a live full-access/default calling thread or a full-access client.",
+        );
       }
       const result = yield* threads
         .dispatch({

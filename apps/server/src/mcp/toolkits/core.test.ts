@@ -2,6 +2,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
+  APPROVAL_REQUEST_TTL_MS,
   DEFAULT_SERVER_SETTINGS,
   ChatImageAttachment,
   CommandId,
@@ -24,6 +25,7 @@ import {
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -78,8 +80,10 @@ const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
 );
 
-const pendingRequestHarness = () => {
-  const shell = McpToolAccessTestkit.liveThreadShell(threadId);
+const pendingRequestHarness = (
+  modes: Parameters<typeof McpToolAccessTestkit.liveThreadShell>[1] = {},
+) => {
+  const shell = McpToolAccessTestkit.liveThreadShell(threadId, modes);
   const requests: Array<OrchestrationV2RuntimeRequest> = [];
   const items: Array<OrchestrationV2TurnItem> = [];
   const dispatched: Array<OrchestrationV2ServerCommand> = [];
@@ -126,10 +130,10 @@ const pendingRequestHarness = () => {
     });
   }
   const dependencies = Layer.mock(ThreadManagement.ThreadManagementService)({
-    getThreadShell: () => Effect.succeed(shell),
-    getProjectThreadRecords: (_target, _fields, query) =>
+    getThreadShell: (id) => Effect.succeed({ ...shell, id }),
+    getProjectThreadRecords: (target, _fields, query) =>
       Effect.sync(() => ({
-        ...McpToolAccessTestkit.idleThreadProjection(shell),
+        ...McpToolAccessTestkit.idleThreadProjection({ ...shell, id: target.threadId }),
         runtimeRequests: requests,
         turnItems: items.filter((item) => query?.turnItemTypes?.includes(item.type) ?? true),
       })),
@@ -281,6 +285,23 @@ it.effect("does not accept decision aliases outside ProviderApprovalDecision", (
   }).pipe(Effect.provide(harness.layer));
 });
 
+it.effect("does not answer expired, resolved, or cancelled questions", () => {
+  const harness = pendingRequestHarness();
+  const index = harness.requests.findIndex(({ kind }) => kind === "user_input");
+  const request = harness.requests[index]!;
+  return Effect.gen(function* () {
+    for (const status of ["expired", "resolved", "cancelled"] as const) {
+      harness.requests[index] = { ...request, status };
+      const result = yield* callPendingTool("t3_pending_request_respond", {
+        requestId: request.id,
+        answers: { size: "large" },
+      });
+      expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
+    }
+    expect(harness.dispatched).toEqual([]);
+  }).pipe(Effect.provide(harness.layer));
+});
+
 it.effect("keeps approval responses behind orchestration and write access", () => {
   const harness = pendingRequestHarness();
   return Effect.gen(function* () {
@@ -306,6 +327,106 @@ it.effect("keeps approval responses behind orchestration and write access", () =
     expect(harness.dispatched).toEqual([]);
   }).pipe(Effect.provide(harness.layer));
 });
+
+it.effect.each([
+  { runtimeMode: "approval-required", interactionMode: "default" },
+  { runtimeMode: "auto-accept-edits", interactionMode: "default" },
+  { runtimeMode: "auto", interactionMode: "default" },
+  { runtimeMode: "full-access", interactionMode: "plan" },
+] as const)(
+  "refuses grants from $runtimeMode/$interactionMode callers but preserves questions and declines",
+  (modes) => {
+    const harness = pendingRequestHarness(modes);
+    return Effect.gen(function* () {
+      for (const target of [undefined, ThreadId.make("same-mode-target")]) {
+        for (const decision of ["accept", "acceptForSession", "acceptAlways"] as const) {
+          const result = yield* callPendingTool("t3_pending_request_respond", {
+            ...(target === undefined ? {} : { threadId: target }),
+            requestId: "request:permission",
+            decision,
+          });
+          expect(declaredFailure(result)).toMatchObject({ code: "capability_denied" });
+        }
+      }
+      expect(harness.dispatched).toEqual([]);
+      for (const response of [
+        { requestId: "request:user_input", answers: { size: "large" } },
+        { requestId: "request:permission", decision: "decline" },
+        { requestId: "request:permission", decision: "cancel" },
+      ]) {
+        const result = yield* callPendingTool("t3_pending_request_respond", response);
+        expect(result.isError).not.toBe(true);
+        expect(harness.dispatched.at(-1)).toMatchObject(response);
+      }
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect("requires full-access client authority to grant approvals", () => {
+  const harness = pendingRequestHarness({ runtimeMode: "approval-required" });
+  return Effect.gen(function* () {
+    for (const access of ["auto", "full-access"] as const) {
+      const result = yield* callPendingTool(
+        "t3_pending_request_respond",
+        { threadId, requestId: "request:permission", decision: "accept" },
+        {
+          ...scope,
+          thread: undefined,
+          client: { sessionId: "client", label: "client", access },
+        },
+      );
+      if (access === "auto") {
+        expect(declaredFailure(result)).toMatchObject({ code: "capability_denied" });
+        expect(harness.dispatched).toEqual([]);
+      } else {
+        expect(result.isError).not.toBe(true);
+        expect(harness.dispatched).toHaveLength(1);
+      }
+    }
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect(
+  "rejects overdue approvals at four hours before the expiry sweep without expiring questions",
+  () => {
+    const harness = pendingRequestHarness();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(DateTime.toEpochMillis(harness.requests[0]!.createdAt));
+      yield* TestClock.adjust(APPROVAL_REQUEST_TTL_MS - 1);
+      const before = yield* callPendingTool("t3_pending_request_respond", {
+        requestId: "request:permission",
+        decision: "accept",
+      });
+      expect(before.isError).not.toBe(true);
+      expect(harness.dispatched).toHaveLength(1);
+      yield* TestClock.adjust(1);
+      for (const kind of ProviderRequestKind.literals) {
+        for (const name of ["t3_pending_request_read", "t3_pending_request_respond"]) {
+          const result = yield* callPendingTool(name, {
+            requestId: `request:${kind}`,
+            ...(name === "t3_pending_request_respond" ? { decision: "accept" } : {}),
+          });
+          expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
+        }
+      }
+      expect(harness.dispatched).toHaveLength(1);
+      const list = yield* callPendingTool("t3_pending_request_list");
+      expect(list.structuredContent).toEqual({
+        requestIds: ["request:user_input", "request:auth_refresh"],
+        requests: [
+          { id: "request:user_input", kind: "user_input" },
+          { id: "request:auth_refresh", kind: "auth_refresh" },
+        ],
+      });
+      const answer = yield* callPendingTool("t3_pending_request_respond", {
+        requestId: "request:user_input",
+        answers: { size: "large" },
+      });
+      expect(answer.isError).not.toBe(true);
+      expect(harness.dispatched).toHaveLength(2);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
 
 const threadId = ThreadId.make("mcp-core-thread");
 const scope: McpInvocationContext.McpInvocationScope = {
