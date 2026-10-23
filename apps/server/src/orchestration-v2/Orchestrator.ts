@@ -7662,7 +7662,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       const now = yield* DateTime.now;
-      const expiresAt = approvalRequestExpiresAt(runtimeRequest);
+      // MCP callers have a grant deadline; interactive clients can still answer old prompts.
+      const mcpLimit = yield* DispatchModeLimit;
+      const expiresAt = mcpLimit === undefined ? null : approvalRequestExpiresAt(runtimeRequest);
       if (
         expiresAt !== null &&
         DateTime.toEpochMillis(now) >= expiresAt &&
@@ -7675,6 +7677,48 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause:
             "This approval expired after 4 hours. Decline or cancel it, then request a new approval in the thread.",
         });
+      }
+      const granting =
+        command.decision === "accept" ||
+        command.decision === "acceptForSession" ||
+        command.decision === "acceptAlways";
+      if (
+        granting &&
+        context.item?.type === "approval_request" &&
+        context.item.options !== undefined &&
+        !context.item.options.some((option) => option.decision === command.decision)
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This approval does not support the requested decision.",
+        });
+      }
+      if (granting && mcpLimit !== undefined) {
+        const callerThreadId = mcpLimit.callerThreadId;
+        const caller =
+          callerThreadId === undefined
+            ? mcpLimit
+            : yield* projectionStore.getThreadShell(callerThreadId).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestratorProjectionError({
+                      threadId: callerThreadId,
+                      cause,
+                    }),
+                ),
+              );
+        if (
+          caller === null ||
+          caller.runtimeMode !== "full-access" ||
+          caller.interactionMode !== "default"
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Granting approvals requires a full-access/default caller at dispatch.",
+          });
+        }
       }
       if (runtimeRequest.responseCapability.type === "not_resumable") {
         return yield* new OrchestratorDispatchError({

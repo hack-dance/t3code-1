@@ -1,5 +1,6 @@
 import {
   approvalRequestExpiresAt,
+  ProviderRequestKind,
   type CommandId,
   type RuntimeRequestId,
   ThreadId,
@@ -219,7 +220,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     Effect.gen(function* () {
       const { projection } = yield* readThread(input.threadId, ["runtimeRequests"]);
       const requests = projection.runtimeRequests
-        .filter((request) => request.status === "pending")
+        .filter(
+          (request) =>
+            request.status === "pending" &&
+            (request.kind === "user_input" ||
+              ProviderRequestKind.literals.some((kind) => kind === request.kind)),
+        )
         .map(({ id, kind }) => ({ id, kind }));
       return {
         requestIds: requests.map(({ id }) => id),
@@ -288,6 +294,16 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         input.decision === "acceptForSession" ||
         input.decision === "acceptAlways"
       ) {
+        if (
+          context.item.type === "approval_request" &&
+          context.item.options !== undefined &&
+          !context.item.options.some((option) => option.decision === input.decision)
+        ) {
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "This approval does not support the requested decision.",
+          });
+        }
         yield* assertFullAccess(
           context,
           "Granting approvals needs a live full-access/default calling thread or a full-access client.",

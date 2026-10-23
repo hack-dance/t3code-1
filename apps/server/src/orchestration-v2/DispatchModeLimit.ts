@@ -18,6 +18,7 @@ export interface DispatchModeRefusal extends DispatchModes {
  * else can change them.
  */
 export interface DispatchModeLimitValue extends DispatchModes {
+  readonly callerThreadId?: ThreadId;
   readonly refused?: Ref.Ref<DispatchModeRefusal | undefined>;
 }
 

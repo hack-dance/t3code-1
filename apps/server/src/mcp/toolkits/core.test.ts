@@ -39,6 +39,10 @@ import {
   OrchestratorProjectionError,
 } from "../../orchestration-v2/Orchestrator.ts";
 
+import {
+  describeMcpElicitation,
+  toMcpElicitationResponse,
+} from "../../provider/CodexMcpElicitation.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
 import * as ProviderAdapterRegistry from "../../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -87,7 +91,12 @@ const pendingRequestHarness = (
   const requests: Array<OrchestrationV2RuntimeRequest> = [];
   const items: Array<OrchestrationV2TurnItem> = [];
   const dispatched: Array<OrchestrationV2ServerCommand> = [];
-  for (const kind of [...ProviderRequestKind.literals, "user_input", "auth_refresh"] as const) {
+  for (const kind of [
+    ...ProviderRequestKind.literals,
+    "user_input",
+    "auth_refresh",
+    "dynamic_tool_call",
+  ] as const) {
     const requestId = RuntimeRequestId.make(`request:${kind}`);
     requests.push({
       id: requestId,
@@ -100,7 +109,7 @@ const pendingRequestHarness = (
       createdAt: shell.createdAt,
       resolvedAt: null,
     });
-    if (kind === "auth_refresh") continue;
+    if (kind === "auth_refresh" || kind === "dynamic_tool_call") continue;
     items.push({
       id: TurnItemId.make(`item:${kind}`),
       threadId,
@@ -125,7 +134,10 @@ const pendingRequestHarness = (
             prompt:
               "command: cat src/example.ts\ncwd: /workspace\npaths: src/example.ts\npermissions: read",
             reason: "Read the requested file",
-            options: [{ decision: "acceptForSession", label: "Allow for session" }],
+            options: ProviderApprovalDecision.literals.map((decision) => ({
+              decision,
+              label: decision,
+            })),
           }),
     });
   }
@@ -145,6 +157,7 @@ const pendingRequestHarness = (
   });
   return {
     requests,
+    items,
     dispatched,
     layer: layerThreadToolkit.pipe(
       Layer.provideMerge(McpServer.McpServer.layer),
@@ -162,14 +175,18 @@ const callPendingTool = (name: string, args: Record<string, unknown> = {}, invoc
   );
 
 it.effect(
-  "lists every pending request kind and reads approval details without changing questions",
+  "lists only actionable pending request kinds and reads approval details without changing questions",
   () => {
     const harness = pendingRequestHarness();
     return Effect.gen(function* () {
       const list = yield* callPendingTool("t3_pending_request_list");
       expect(list.structuredContent).toEqual({
-        requestIds: harness.requests.map(({ id }) => id),
-        requests: harness.requests.map(({ id, kind }) => ({ id, kind })),
+        requestIds: harness.requests
+          .filter(({ kind }) => kind !== "auth_refresh" && kind !== "dynamic_tool_call")
+          .map(({ id }) => id),
+        requests: harness.requests
+          .filter(({ kind }) => kind !== "auth_refresh" && kind !== "dynamic_tool_call")
+          .map(({ id, kind }) => ({ id, kind })),
       });
       for (const kind of ProviderRequestKind.literals) {
         const read = yield* callPendingTool("t3_pending_request_read", {
@@ -181,7 +198,10 @@ it.effect(
           prompt:
             "command: cat src/example.ts\ncwd: /workspace\npaths: src/example.ts\npermissions: read",
           reason: "Read the requested file",
-          options: [{ decision: "acceptForSession", label: "Allow for session" }],
+          options: ProviderApprovalDecision.literals.map((decision) => ({
+            decision,
+            label: decision,
+          })),
         });
       }
       const question = yield* callPendingTool("t3_pending_request_read", {
@@ -192,7 +212,10 @@ it.effect(
         questions: [],
       });
       harness.requests.splice(0, 1, { ...harness.requests[0]!, status: "resolved" });
-      const pending = harness.requests.filter(({ status }) => status === "pending");
+      const pending = harness.requests.filter(
+        ({ status, kind }) =>
+          status === "pending" && kind !== "auth_refresh" && kind !== "dynamic_tool_call",
+      );
       const updated = yield* callPendingTool("t3_pending_request_list");
       expect(updated.structuredContent).toEqual({
         requestIds: pending.map(({ id }) => id),
@@ -227,6 +250,45 @@ it.effect("maps approval decisions including acceptForSession to runtime-request
     expect(result.isError).not.toBe(true);
     expect(harness.dispatched.at(-1)).toMatchObject({ answers: { size: "large" } });
     expect(harness.dispatched.at(-1)).not.toHaveProperty("decision");
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("rejects unsupported elicitation grants without consuming the pending request", () => {
+  const harness = pendingRequestHarness();
+  const payload = {
+    mode: "form" as const,
+    message: "Approve?",
+    serverName: "test",
+    threadId: "native",
+    turnId: "turn",
+    requestedSchema: {
+      type: "object" as const,
+      properties: { approval: { type: "string" as const, enum: ["once", "always"] } },
+      required: ["approval"],
+    },
+  };
+  const index = harness.items.findIndex(
+    (item) => item.type === "approval_request" && item.requestKind === "permission",
+  );
+  const item = harness.items[index]!;
+  harness.items[index] = { ...item, ...describeMcpElicitation(payload) };
+  return Effect.gen(function* () {
+    expect(toMcpElicitationResponse(payload, "acceptForSession").action).toBe("decline");
+    const result = yield* callPendingTool("t3_pending_request_respond", {
+      requestId: "request:permission",
+      decision: "acceptForSession",
+    });
+    expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
+    expect(harness.dispatched).toEqual([]);
+    expect(harness.requests.find(({ kind }) => kind === "permission")?.status).toBe("pending");
+    for (const decision of ["accept", "acceptAlways"] as const) {
+      const accepted = yield* callPendingTool("t3_pending_request_respond", {
+        requestId: "request:permission",
+        decision,
+      });
+      expect(accepted.isError).not.toBe(true);
+      expect(toMcpElicitationResponse(payload, decision).action).toBe("accept");
+    }
   }).pipe(Effect.provide(harness.layer));
 });
 
@@ -414,8 +476,12 @@ it.effect("keeps overdue approvals discoverable and rejectable while refusing gr
     expect(harness.dispatched).toHaveLength(1);
     const list = yield* callPendingTool("t3_pending_request_list");
     expect(list.structuredContent).toEqual({
-      requestIds: harness.requests.map(({ id }) => id),
-      requests: harness.requests.map(({ id, kind }) => ({ id, kind })),
+      requestIds: harness.requests
+        .filter(({ kind }) => kind !== "auth_refresh" && kind !== "dynamic_tool_call")
+        .map(({ id }) => id),
+      requests: harness.requests
+        .filter(({ kind }) => kind !== "auth_refresh" && kind !== "dynamic_tool_call")
+        .map(({ id, kind }) => ({ id, kind })),
     });
     const answer = yield* callPendingTool("t3_pending_request_respond", {
       requestId: "request:user_input",
