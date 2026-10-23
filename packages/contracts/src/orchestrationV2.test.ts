@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 
 import { NodeId, RunAttemptId, TrimmedNonEmptyString } from "./index.ts";
 import {
+  approvalRequestExpiresAt,
   latestProviderTurnForAttempt,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
@@ -34,6 +35,23 @@ const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
 );
 
 describe("orchestration V2 contracts", () => {
+  it("gives approvals a four-hour deadline without expiring questions or tools", () => {
+    const createdAt = DateTime.makeUnsafe("2026-04-20T00:00:00.000Z");
+    for (const kind of [
+      "command",
+      "file-read",
+      "file-change",
+      "permission",
+      "mcp-elicitation",
+    ] as const) {
+      expect(approvalRequestExpiresAt({ kind, createdAt })).toBe(
+        Date.parse("2026-04-20T04:00:00.000Z"),
+      );
+    }
+    for (const kind of ["user_input", "auth_refresh", "dynamic_tool_call"] as const) {
+      expect(approvalRequestExpiresAt({ kind, createdAt })).toBeNull();
+    }
+  });
   it("decodes thread event types from a newer server as skippable items", () => {
     const decodeWireItems = Schema.decodeUnknownSync(
       Schema.toCodecJson(Schema.Array(OrchestrationV2RpcSchemas.subscribeThread.output)),

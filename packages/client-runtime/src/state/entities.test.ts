@@ -22,6 +22,28 @@ import { canSnooze, effectiveSnoozed } from "./threadSettled.ts";
 const environmentId = EnvironmentId.make("environment-v2");
 
 describe("V2 client presentation", () => {
+  it("exposes approval deadlines only for pending agent approvals", () => {
+    const pending = { id: RuntimeRequestId.make("approval"), createdAt: v2ThreadShell.updatedAt };
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      pendingRuntimeRequest: { ...pending, kind: "command" },
+    });
+    expect(shell.pendingApproval?.expiresAt).toBe(
+      DateTime.toEpochMillis(pending.createdAt) + 4 * 60 * 60 * 1000,
+    );
+    for (const kind of ["user_input", "dynamic_tool_call", "auth_refresh"] as const) {
+      const other = presentThreadShell(environmentId, {
+        ...v2ThreadShell,
+        pendingRuntimeRequest: { ...pending, kind },
+      });
+      expect(other.pendingApproval).toBeNull();
+      expect(other.hasPendingApprovals).toBe(false);
+    }
+    expect(
+      presentThreadShell(environmentId, { ...v2ThreadShell, pendingRuntimeRequest: null })
+        .pendingApproval,
+    ).toBeNull();
+  });
   it("keeps async questions in Working until the run completes", () => {
     const runId = RunId.make("run-async-question");
     const running = {

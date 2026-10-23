@@ -18,6 +18,15 @@ and modes you choose in a draft keep their permissions.
 Approve or reject requests in the conversation to let the agent continue. Permission modes do
 not prevent the agent from asking questions about the task.
 
+Approval requests expire after four hours. An expired request cannot authorize an action;
+ask the agent in its thread for a new request if the action is still needed. Questions do not
+expire on this deadline.
+
+On web and desktop, open **Agent approvals** from the sidebar or command palette to find
+pending requests across your connected environments. Filter by host and project to narrow the
+list. Local-action cards link to their threads, where you can review the request and respond.
+Expired requests disappear from this list and remain marked as expired in the thread history.
+
 ## Provider differences
 
 Providers enforce permissions differently. Some read-only actions can proceed in **Supervised**.

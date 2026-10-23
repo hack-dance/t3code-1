@@ -32,6 +32,8 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ApprovalExpiry from "./ApprovalExpiry.ts";
+import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -1230,4 +1232,216 @@ it.effect("explicit settle clears snooze atomically and stays idempotent after r
     assert.deepInclude(yield* projections.getThreadShell(threadId), active);
     assert.deepInclude((yield* projections.getThreadProjection(threadId)).thread, active);
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("rejects approval responses at the four-hour deadline before queuing provider work", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const threadId = ThreadId.make("thread:approval-deadline");
+    const requestId = RuntimeRequestId.make("approval-deadline");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-approval-deadline"),
+      threadId,
+      projectId: ProjectId.make("project:approval-deadline"),
+      title: "Approval deadline",
+      modelSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* projections.apply({
+      id: EventId.make("approval-deadline"),
+      type: "runtime-request.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: requestId,
+        nodeId: NodeId.make("approval-node"),
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "command",
+        status: "pending",
+        responseCapability: { type: "live", providerSessionId: ProviderSessionId.make("session") },
+        createdAt: now,
+        resolvedAt: null,
+      },
+    });
+    yield* projections.apply({
+      id: EventId.make("approval-session"),
+      type: "provider-session.attached",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: ProviderSessionId.make("session"),
+        driver: adapter.driver,
+        providerInstanceId: instanceId,
+        status: "ready",
+        cwd: "/repo",
+        model: "gpt-6",
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+      },
+    });
+    const earlyRequestId = RuntimeRequestId.make("approval-before-deadline");
+    const pending = yield* projections.getRuntimeRequest(threadId, requestId);
+    assert.ok(pending);
+    yield* projections.apply({
+      id: EventId.make("approval-before-deadline"),
+      type: "runtime-request.updated",
+      threadId,
+      occurredAt: now,
+      payload: { ...pending, id: earlyRequestId, nodeId: NodeId.make("early-approval-node") },
+    });
+    yield* TestClock.adjust("14399999 millis");
+    yield* orchestrator.dispatch({
+      type: "runtime-request.respond",
+      commandId: CommandId.make("approve-before-expiry"),
+      threadId,
+      requestId: earlyRequestId,
+      decision: "accept",
+    });
+    assert.equal(
+      (yield* projections.getRuntimeRequest(threadId, earlyRequestId))?.status,
+      "resolved",
+    );
+    yield* TestClock.adjust("1 millis");
+    const commandId = CommandId.make("approve-expired");
+    const result = yield* orchestrator
+      .dispatch({
+        type: "runtime-request.respond",
+        commandId,
+        threadId,
+        requestId,
+        decision: "accept",
+      })
+      .pipe(Effect.flip);
+    assert.equal(result._tag, "OrchestratorDispatchError");
+    if (result._tag === "OrchestratorDispatchError") {
+      assert.equal(
+        result.cause,
+        "This approval expired after 4 hours. Request a new approval in the thread.",
+      );
+    }
+    assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("persists approval expiry once, hides pending state, and queues only a decline", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const expiry = yield* ApprovalExpiry.ApprovalExpiry;
+    const threadId = ThreadId.make("thread:approval-sweep");
+    const requestId = RuntimeRequestId.make("approval-sweep");
+    const nodeId = NodeId.make("approval-sweep-node");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-approval-sweep"),
+      threadId,
+      projectId: ProjectId.make("project:approval-sweep"),
+      title: "Approval sweep",
+      modelSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const sink = yield* EventSink.EventSinkV2;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("approval-sweep-request"),
+          type: "runtime-request.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: requestId,
+            nodeId,
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "command",
+            status: "pending",
+            responseCapability: {
+              type: "live",
+              providerSessionId: ProviderSessionId.make("sweep-session"),
+            },
+            createdAt: now,
+            resolvedAt: null,
+          },
+        },
+        {
+          id: EventId.make("approval-sweep-item"),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make("approval-item"),
+            threadId,
+            runId: null,
+            nodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "waiting",
+            title: null,
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+            type: "approval_request",
+            requestId,
+            requestKind: "command",
+            prompt: "Run a command",
+          },
+        },
+      ],
+    });
+    yield* TestClock.adjust("14399999 millis");
+    yield* expiry.sweep;
+    assert.equal((yield* projections.getRuntimeRequest(threadId, requestId))?.status, "pending");
+    yield* TestClock.adjust("1 millis");
+    yield* expiry.sweep;
+    const context = yield* projections.getRuntimeResponseContext(threadId, requestId);
+    assert.equal(context.request?.status, "expired");
+    assert.equal(context.item?.title, "Approval expired after 4 hours");
+    assert.equal(context.item?.status, "cancelled");
+    assert.isNull((yield* projections.getThreadShell(threadId))?.pendingRuntimeRequest);
+    const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+    yield* expiry.sweep;
+    assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+    assert.deepEqual(
+      (yield* outbox.listByCommandId(
+        CommandId.make(`approval-expiry:${threadId}:${requestId}`),
+      )).map((effect) => effect.request),
+      [
+        {
+          type: "runtime-request.respond",
+          providerSessionId: ProviderSessionId.make("sweep-session"),
+          requestId,
+          decision: "decline",
+        },
+      ],
+    );
+  }).pipe(
+    Effect.provide(
+      ApprovalExpiry.layer.pipe(
+        Layer.provideMerge(layerTest),
+        Layer.provide(ThreadCommandExecutor.layer),
+      ),
+    ),
+  ),
 );

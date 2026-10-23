@@ -208,3 +208,32 @@ export function createQuestionHistoryProjector<
     return previousResult;
   };
 }
+
+/** Shells only expose pending requests; scope by both environment and project IDs. */
+export function filterApprovalThreads<
+  T extends {
+    readonly environmentId: string;
+    readonly projectId: string;
+    readonly archivedAt: string | null;
+    readonly pendingApproval?: { readonly expiresAt: number } | null;
+  },
+>(
+  threads: ReadonlyArray<T>,
+  scope: {
+    readonly environmentIds: ReadonlySet<string>;
+    readonly environmentId?: string;
+    readonly projectId?: string;
+    readonly nowMs: number;
+  },
+): T[] {
+  return threads.filter(
+    (thread) =>
+      scope.environmentIds.has(thread.environmentId) &&
+      (scope.environmentId === undefined || thread.environmentId === scope.environmentId) &&
+      (scope.projectId === undefined || thread.projectId === scope.projectId) &&
+      thread.archivedAt === null &&
+      thread.pendingApproval !== null &&
+      thread.pendingApproval !== undefined &&
+      thread.pendingApproval.expiresAt > scope.nowMs,
+  );
+}

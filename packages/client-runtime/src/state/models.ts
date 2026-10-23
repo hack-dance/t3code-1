@@ -1,5 +1,6 @@
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
+import { approvalRequestExpiresAt } from "@t3tools/contracts";
 import type {
   ThreadLinkedPullRequest,
   EnvironmentId,
@@ -154,6 +155,7 @@ export interface EnvironmentThreadShell {
   readonly latestUserMessageAt: string | null;
   readonly latestUserAuthoredMessageAt?: string | null;
   readonly hasPendingApprovals: boolean;
+  readonly pendingApproval?: { readonly expiresAt: number } | null;
   readonly hasPendingUserInput: boolean;
   readonly pendingSubagentRequest?: PendingSubagentRequest | null;
   readonly hasActionableProposedPlan: boolean;
@@ -253,6 +255,10 @@ export function presentThreadShell(
   pendingSubagentRequest: PendingSubagentRequest | null = null,
 ): EnvironmentThreadShell {
   const updatedAt = iso(thread.updatedAt);
+  const approvalExpiresAt =
+    thread.pendingRuntimeRequest === null
+      ? null
+      : approvalRequestExpiresAt(thread.pendingRuntimeRequest);
   const latestRun =
     thread.latestRunId === null
       ? null
@@ -302,10 +308,8 @@ export function presentThreadShell(
     ...(thread.latestUserAuthoredMessageAt === undefined
       ? {}
       : { latestUserAuthoredMessageAt: nullableIso(thread.latestUserAuthoredMessageAt) }),
-    hasPendingApprovals:
-      thread.pendingRuntimeRequest !== null &&
-      thread.pendingRuntimeRequest.kind !== "user_input" &&
-      thread.pendingRuntimeRequest.kind !== "auth_refresh",
+    hasPendingApprovals: approvalExpiresAt !== null,
+    pendingApproval: approvalExpiresAt === null ? null : { expiresAt: approvalExpiresAt },
     hasPendingUserInput:
       thread.pendingRuntimeRequest?.kind === "user_input" &&
       (thread.pendingRuntimeRequest.blocking !== false || !runtimeIsWorking),

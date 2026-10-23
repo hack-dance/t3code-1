@@ -58,6 +58,7 @@ import {
   FolderPlusIcon,
   MessageSquareDashedIcon,
   LinkIcon,
+  ListFilterIcon,
   MessageSquareIcon,
   PaletteIcon,
   RotateCcwIcon,
@@ -1527,6 +1528,17 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:approvals",
+    searchTerms: ["approvals", "pending", "agent", "permissions"],
+    title: "Open agent approvals",
+    icon: <ListFilterIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/approvals" });
+    },
+  });
 
   actionItems.push({
     kind: "action",

@@ -67,6 +67,8 @@ import {
   TurnItemId,
   NodeId,
   ProviderInstanceId,
+  APPROVAL_REQUEST_TTL_MS,
+  approvalRequestExpiresAt,
 } from "@t3tools/contracts";
 import {
   createOrchestrationV2TurnItemVisibility,
@@ -445,6 +447,12 @@ export interface ProjectionStoreV2Shape {
     readonly autoResume: boolean;
     readonly snooze: boolean;
   }) => Effect.Effect<ReadonlyArray<ProjectionLimitRecoveryCandidate>, ProjectionStoreV2Error>;
+  readonly getExpiredApprovalCandidates: (
+    now: DateTime.Utc,
+  ) => Effect.Effect<
+    ReadonlyArray<{ readonly threadId: ThreadId; readonly requestId: RuntimeRequestId }>,
+    ProjectionStoreV2Error
+  >;
   readonly getSettlementCandidates: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionSettlementCandidate>, ProjectionStoreV2Error>;
@@ -3762,6 +3770,33 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         ),
     );
 
+    const getExpiredApprovalCandidates = Effect.fn("ProjectionStore.getExpiredApprovalCandidates")(
+      function* (now: DateTime.Utc) {
+        const cutoff = DateTime.formatIso(
+          DateTime.makeUnsafe(DateTime.toEpochMillis(now) - APPROVAL_REQUEST_TTL_MS),
+        );
+        const rows = yield* sql<{ thread_id: string; runtime_request_id: string }>`
+          SELECT request.thread_id, request.runtime_request_id
+          FROM orchestration_v2_projection_runtime_requests request
+          INNER JOIN orchestration_v2_projection_threads thread ON thread.thread_id = request.thread_id
+          WHERE request.status = 'pending'
+            AND request.kind IN ('command', 'file-read', 'file-change', 'permission', 'mcp-elicitation')
+            AND request.created_at <= ${cutoff} AND thread.deleted_at IS NULL
+          ORDER BY request.created_at, request.runtime_request_id
+          LIMIT 200
+        `.pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProjectionStoreReadError({ threadId: ThreadId.make("approval-expiry"), cause }),
+          ),
+        );
+        return rows.map((row) => ({
+          threadId: ThreadId.make(row.thread_id),
+          requestId: RuntimeRequestId.make(row.runtime_request_id),
+        }));
+      },
+    );
+
     const getLimitRecoveryCandidates = Effect.fn("ProjectionStore.getLimitRecoveryCandidates")(
       function* (options: Parameters<ProjectionStoreV2Shape["getLimitRecoveryCandidates"]>[0]) {
         const rows = yield* sql<{
@@ -6514,6 +6549,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getPlan,
       getProviderControlContext,
       getLimitRecoveryCandidates,
+      getExpiredApprovalCandidates,
       getRecoveryThreadIds,
       getUnreadableThreadIds,
       getThreadSnapshot,
@@ -6678,6 +6714,36 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 settledAt: thread.settledAt,
                 pullRequests: thread.pullRequests ?? [],
               })),
+          ),
+        ),
+      getExpiredApprovalCandidates: (now) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()]
+              .filter(({ thread }) => thread.deletedAt === null)
+              .flatMap(({ thread, runtimeRequests }) =>
+                runtimeRequests
+                  .filter((request) => {
+                    const deadline = approvalRequestExpiresAt(request);
+                    return (
+                      request.status === "pending" &&
+                      deadline !== null &&
+                      deadline <= DateTime.toEpochMillis(now)
+                    );
+                  })
+                  .map((request) => ({
+                    threadId: thread.id,
+                    requestId: request.id,
+                    createdAt: request.createdAt,
+                  })),
+              )
+              .sort(
+                (a, b) =>
+                  DateTime.toEpochMillis(a.createdAt) - DateTime.toEpochMillis(b.createdAt) ||
+                  a.requestId.localeCompare(b.requestId),
+              )
+              .slice(0, 200)
+              .map(({ threadId, requestId }) => ({ threadId, requestId })),
           ),
         ),
       getLimitRecoveryCandidates: (options) =>
