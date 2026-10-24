@@ -1019,6 +1019,7 @@ export function latestProviderTurnForAttempt<
 }
 
 export const OrchestrationV2RuntimeRequest = Schema.Struct({
+  providerSessionId: Schema.optional(ProviderSessionId),
   action: Schema.optional(Schema.Unknown),
   id: RuntimeRequestId,
   nodeId: NodeId,

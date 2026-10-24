@@ -21,6 +21,7 @@ export function approvalActionDigest(request: OrchestrationV2RuntimeRequest): st
     requestId: request.id,
     nodeId: request.nodeId,
     providerTurnId: request.providerTurnId,
+    providerSessionId: request.providerSessionId ?? null,
     nativeRequestRef: request.nativeRequestRef,
     kind: request.kind,
     createdAt: DateTime.formatIso(request.createdAt),

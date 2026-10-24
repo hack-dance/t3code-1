@@ -196,6 +196,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         modelSelection: thread.modelSelection,
         runtimeMode: thread.runtimeMode,
         interactionMode: thread.interactionMode,
+        ...(thread.claudeToolPolicy === undefined
+          ? {}
+          : { claudeToolPolicy: thread.claudeToolPolicy }),
       };
     }),
   ),

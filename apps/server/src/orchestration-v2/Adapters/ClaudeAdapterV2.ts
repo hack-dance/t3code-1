@@ -6471,6 +6471,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             completedAt: null,
           };
           const request: OrchestrationV2RuntimeRequest = {
+            providerSessionId: providerSessionId,
             id: requestId,
             nodeId,
             providerTurnId: input.context.providerTurnId,

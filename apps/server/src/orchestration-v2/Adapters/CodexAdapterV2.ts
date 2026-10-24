@@ -4152,6 +4152,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             completedAt: null,
           };
           const request: OrchestrationV2RuntimeRequest = {
+            providerSessionId: providerSessionId,
             id: requestId,
             nodeId,
             providerTurnId: owner.providerTurnId,

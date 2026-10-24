@@ -1140,6 +1140,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
                 ? "file-read"
                 : "file-change";
         const runtimeRequest: OrchestrationV2RuntimeRequest = {
+          providerSessionId: input.providerSessionId,
           action: native,
           id: requestId,
           nodeId,

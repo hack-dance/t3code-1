@@ -23,6 +23,7 @@ function safeShell(command: string): boolean {
   if (!tokens || tokens.join(" ") !== command.trim().replace(/\s+/g, " ")) return false;
   const args = tokens.map((token) => token.replace(/^(['"])(.*)\1$/, "$2"));
   if (args[0] === "git") {
+    if (args.some((arg) => arg.includes("%G"))) return false;
     return (
       ["diff", "log", "show", "status", "rev-parse", "merge-base", "ls-files", "blame"].includes(
         args[1] ?? "",
@@ -42,7 +43,7 @@ function safeShell(command: string): boolean {
     )
       return false;
     if (args[1] === "pr") return ["view", "diff", "checks"].includes(args[2] ?? "");
-    if (args[1] !== "api") return false;
+    if (args[1] !== "api" || args.includes("graphql") || args.includes("/graphql")) return false;
     for (let i = 2; i < args.length; i++) {
       const arg = args[i]!;
       if (arg === "-X" || arg === "--method") {
@@ -75,8 +76,17 @@ export function claudeToolPolicyAllows(input: {
       ? toolInput.command
       : "";
   if (toolName === "Bash" && (!command || !safeShell(command))) return false;
+  const path =
+    typeof toolInput === "object" && toolInput !== null
+      ? "file_path" in toolInput && typeof toolInput.file_path === "string"
+        ? toolInput.file_path
+        : "path" in toolInput && typeof toolInput.path === "string"
+          ? toolInput.path
+          : ""
+      : "";
+  const target = toolName === "Bash" ? command : path;
   return (
-    !policy.disallowedTools.some((rule) => matches(rule, toolName, command)) &&
-    policy.allowedTools.some((rule) => matches(rule, toolName, command))
+    !policy.disallowedTools.some((rule) => matches(rule, toolName, target)) &&
+    policy.allowedTools.some((rule) => matches(rule, toolName, target))
   );
 }

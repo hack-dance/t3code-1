@@ -7,6 +7,7 @@ import {
   OrchestrationV2ContextTransfer,
   TrimmedNonEmptyString,
   ModelSelection,
+  ClaudeToolPolicy,
   RuntimeMode,
   ProviderInteractionMode,
   RuntimeRequestId,
@@ -218,6 +219,7 @@ const ThreadConfigurationTool = Tool.make("t3_thread_configuration", {
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
+    claudeToolPolicy: Schema.optional(ClaudeToolPolicy),
   }),
 })
   .annotate(Tool.Readonly, true)

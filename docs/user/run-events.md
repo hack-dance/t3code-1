@@ -1,5 +1,47 @@
 # Run lifecycle events
 
+## Fleet permission events
+
+Add a `permissions` entry to the same configuration file to forward approvals
+from every session in an environment. This is independent of the run-lifecycle
+provider/project filters:
+
+```json
+{
+  "permissions": {
+    "environmentId": "the-id-from-t3_environment_read",
+    "sourceHost": "fleet-host-label",
+    "t3Origin": "https://host.example.ts.net",
+    "executable": "/absolute/path/to/machine-agent-run",
+    "args": ["_permission-event"],
+    "timeoutMs": 30000
+  }
+}
+```
+
+The existing fleet bridge receives `work.needs_attention` when a runtime approval
+is pending and `work.attention_closed` when it resolves, is cancelled, or expires.
+Each includes stable environment/session/thread/request correlation, the T3 link,
+an exact-action SHA-256 digest, and the original four-hour deadline. Command
+contents, tool inputs, and credentials are excluded. Questions and provider tool
+callbacks are not approval events.
+
+Delivery replays the committed event log from a private cursor, retains the cursor
+on failure, and retries with the same event identity. The receiver must deduplicate.
+An acknowledged event proves storage/delivery to that receiver, not a human reply.
+Configure the existing Kit-to-Lucy relay on the fleet side; this does not create a
+chat integration, grant approvals, or change Tailscale policy.
+
+Claude review threads can receive a `claudeToolPolicy` at launch, with `id`,
+`allowedTools`, and `disallowedTools`. Installing one through MCP requires a live
+full-access/default caller or full-access client. The policy uses default
+permission callbacks even when the thread's runtime mode would otherwise permit
+bypass. Exclusions and shell/method checks run before SDK prefix approval. Calls
+outside the automatic policy ask normally. Automatic decisions are appended to
+the environment's private `permission-audit.jsonl`; an audit failure asks instead.
+
+## Run notifications
+
 T3 Code can send metadata about thread turns to an HTTP webhook, a local command, or both. This works for turns started from any client, scheduled tasks, and app-owned delegated threads. It is disabled unless you configure a sink on the server that owns the threads.
 
 Set `T3CODE_RUN_EVENTS_CONFIG` to the path of a JSON file before starting the server, then restart it. For example:

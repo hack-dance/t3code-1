@@ -46,9 +46,10 @@ export function permissionPayload(input: {
     sourceHost: input.config.sourceHost,
     threadId: event.threadId,
     sessionId:
-      request.responseCapability.type === "live"
+      request.providerSessionId ??
+      (request.responseCapability.type === "live"
         ? request.responseCapability.providerSessionId
-        : (request.providerTurnId ?? request.id),
+        : (request.providerTurnId ?? request.id)),
     requestId: request.id,
     t3Link: `${origin.origin}/${encodeURIComponent(input.projectId)}/${encodeURIComponent(event.threadId)}`,
     actionDigest: approvalActionDigest(request),
