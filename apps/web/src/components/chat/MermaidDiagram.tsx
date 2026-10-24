@@ -4,6 +4,7 @@ import { use, useLayoutEffect, useRef, useState } from "react";
 
 import { serializeCodeBlockToMarkdown } from "../../markdown-clipboard";
 import { Button } from "../ui/button";
+import { PELE_SAFE_OPTIONS } from "./peleOptions";
 
 type Pele = typeof import("pele/lazy");
 type PeleLoad = { readonly status: "loaded"; readonly pele: Pele } | { readonly status: "failed" };
@@ -203,6 +204,37 @@ let expandedImageUrl: string | null = null;
  * A blob URL, unlike a data URL, passes the desktop connect-src policy that media
  * save and copy actions fetch through.
  */
+// The house theme (hd-diagram-theme.css) styles shapes and labels from the page
+// stylesheet, which a detached SVG image cannot see. Copy the resolved
+// presentation values onto the clone so expanded/saved diagrams keep them.
+const HOUSE_STYLED_SELECTOR = "rect, path, polygon, circle, ellipse, line, polyline, text, tspan";
+const HOUSE_STYLED_PROPERTIES = [
+  "fill",
+  "stroke",
+  "stroke-width",
+  "stroke-dasharray",
+  "stroke-linecap",
+  "font-family",
+  "font-size",
+  "font-weight",
+  "letter-spacing",
+] as const;
+
+function inlineHouseStyles(source: SVGSVGElement, clone: SVGSVGElement): void {
+  const from = source.querySelectorAll<SVGElement>(HOUSE_STYLED_SELECTOR);
+  const to = clone.querySelectorAll<SVGElement>(HOUSE_STYLED_SELECTOR);
+  if (from.length !== to.length) return;
+  from.forEach((node, index) => {
+    const target = to[index];
+    if (!target) return;
+    const computed = getComputedStyle(node);
+    for (const name of HOUSE_STYLED_PROPERTIES) {
+      const value = computed.getPropertyValue(name).trim();
+      if (value) target.style.setProperty(name, value);
+    }
+  });
+}
+
 function diagramImageUrl(svg: SVGSVGElement): string {
   const element = svg.cloneNode(true) as SVGSVGElement;
   const computed = getComputedStyle(svg);
@@ -210,6 +242,10 @@ function diagramImageUrl(svg: SVGSVGElement): string {
     const value = computed.getPropertyValue(name).trim();
     if (value) element.style.setProperty(name, value);
   }
+  inlineHouseStyles(svg, element);
+  // Shapes use rx: var(--_r), which resolves from --pele-radius set by the house theme.
+  const radius = computed.getPropertyValue("--pele-radius").trim();
+  if (radius) element.style.setProperty("--pele-radius", radius);
   element.style.maxWidth = "none";
   element.style.backgroundColor = getComputedStyle(document.body).backgroundColor;
   if (expandedImageUrl) URL.revokeObjectURL(expandedImageUrl);
@@ -239,8 +275,7 @@ export function MermaidDiagram({
     const container = containerRef.current;
     if (load.status !== "loaded" || !container) return;
     const mounted = load.pele.mount(container, trimmedSource, {
-      links: false,
-      images: false,
+      ...PELE_SAFE_OPTIONS,
       zoom: false,
       // Keep the author's direction; a wide diagram scales down to fit instead of turning vertical.
       autoDirection: false,
@@ -302,20 +337,22 @@ function DiagramError({
 }) {
   return (
     <div>
+      <pre
+        data-thread-find-ignore
+        className="mt-0 mb-2 overflow-auto font-mono text-xs whitespace-pre-wrap"
+      >
+        {source}
+      </pre>
       <div className="flex items-center justify-between gap-2">
-        <p className="m-0 text-xs text-destructive">Unable to render diagram: {message}</p>
+        <p className="m-0 text-xs whitespace-pre-wrap text-destructive" data-mermaid-error="">
+          Unable to render diagram: {message}
+        </p>
         {onRetry ? (
           <Button type="button" variant="ghost" size="xs" onClick={onRetry}>
             Retry
           </Button>
         ) : null}
       </div>
-      <pre
-        data-thread-find-ignore
-        className="mt-2 mb-0 overflow-auto font-mono text-xs whitespace-pre-wrap"
-      >
-        {source}
-      </pre>
     </div>
   );
 }

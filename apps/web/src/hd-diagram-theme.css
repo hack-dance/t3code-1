@@ -1,0 +1,151 @@
+/* Hack Dance house theme for Pele (Mermaid) diagrams, mapped to T3 tokens.
+   Source of truth: roodboi/machine files/pele/hackdance.css (Lucy's style kit).
+   Neutrals, accent, error and the live/wait/ok/fail/idle state colors follow the
+   active T3 theme tokens (light and dark, custom themes too); the series palette
+   and font stacks come from the house theme. Pele reads colors through --pele-*,
+   so a theme change recolors diagrams without re-rendering.
+   Authors use house classes only: `classDef live stroke-width:1.6px` + `class X live`. */
+:root {
+  --hd-series-1: #5b3df5;
+  --hd-series-2: #0e9f8a;
+  --hd-series-3: #e08a00;
+  --hd-series-4: #d6345a;
+  --hd-series-5: #2f7de1;
+  --hd-series-6: #8a5cf6;
+  --hd-series-7: #4f9d2d;
+  --hd-series-8: #a0674b;
+}
+
+.dark {
+  --hd-series-1: #9a86ff;
+  --hd-series-2: #3fd1b8;
+  --hd-series-3: #ffb547;
+  --hd-series-4: #ff6b8b;
+  --hd-series-5: #6aa8ff;
+  --hd-series-6: #c4a5ff;
+  --hd-series-7: #8fd16a;
+  --hd-series-8: #d29b7f;
+}
+
+.pele {
+  --pele-font: "Geist", var(--font-sans, ui-sans-serif, system-ui, sans-serif);
+  --pele-font-mono: "Geist Mono", var(--font-mono, ui-monospace, monospace);
+  --pele-bg: var(--background);
+  --pele-fg: var(--foreground);
+  --pele-muted: var(--muted-foreground);
+  --pele-line: color-mix(in srgb, var(--foreground) 62%, transparent);
+  --pele-surface: var(--card);
+  --pele-surface-alt: var(--secondary);
+  --pele-border: color-mix(in srgb, var(--foreground) 22%, transparent);
+  --pele-accent: var(--primary);
+  --pele-critical: var(--destructive);
+  --pele-error: var(--destructive);
+  --pele-radius: 8px;
+  --pele-title-weight: 600;
+  --pele-heading-weight: 600;
+  --pele-bold-weight: 600;
+  --pele-series-1: var(--hd-series-1);
+  --pele-series-2: var(--hd-series-2);
+  --pele-series-3: var(--hd-series-3);
+  --pele-series-4: var(--hd-series-4);
+  --pele-series-5: var(--hd-series-5);
+  --pele-series-6: var(--hd-series-6);
+  --pele-series-7: var(--hd-series-7);
+  --pele-series-8: var(--hd-series-8);
+  /* semantic state colors (house classes) */
+  --hd-live: var(--primary);
+  --hd-wait: var(--warning);
+  --hd-ok: var(--success);
+  --hd-fail: var(--destructive);
+  --hd-idle: var(--muted-foreground);
+  --hd-live-bg: color-mix(in srgb, var(--hd-live) 14%, var(--background));
+  --hd-wait-bg: color-mix(in srgb, var(--hd-wait) 14%, var(--background));
+  --hd-ok-bg: color-mix(in srgb, var(--hd-ok) 14%, var(--background));
+  --hd-fail-bg: color-mix(in srgb, var(--hd-fail) 14%, var(--background));
+  --hd-idle-bg: var(--secondary);
+}
+
+/* polish */
+.pele .pele-edge path {
+  stroke-width: 1.4px;
+  stroke-linecap: round;
+}
+.pele .pele-edge-label {
+  font-size: 0.92em;
+}
+.pele .pele-edge-label text {
+  fill: var(--pele-muted);
+}
+.pele .pele-cluster-label,
+.pele .pele-title {
+  letter-spacing: 0.01em;
+}
+.pele .pele-node > rect,
+.pele .pele-node > path,
+.pele .pele-node > polygon,
+.pele .pele-node > circle,
+.pele .pele-node > ellipse {
+  stroke-width: 1.2px;
+}
+
+/* house semantic classes */
+.pele .live > rect,
+.pele .live > path,
+.pele .live > polygon,
+.pele .live > circle,
+.pele .live > ellipse {
+  fill: var(--hd-live-bg) !important;
+  stroke: var(--hd-live) !important;
+}
+.pele .wait > rect,
+.pele .wait > path,
+.pele .wait > polygon,
+.pele .wait > circle,
+.pele .wait > ellipse {
+  fill: var(--hd-wait-bg) !important;
+  stroke: var(--hd-wait) !important;
+}
+.pele .ok > rect,
+.pele .ok > path,
+.pele .ok > polygon,
+.pele .ok > circle,
+.pele .ok > ellipse {
+  fill: var(--hd-ok-bg) !important;
+  stroke: var(--hd-ok) !important;
+}
+.pele .fail > rect,
+.pele .fail > path,
+.pele .fail > polygon,
+.pele .fail > circle,
+.pele .fail > ellipse {
+  fill: var(--hd-fail-bg) !important;
+  stroke: var(--hd-fail) !important;
+}
+.pele .idle > rect,
+.pele .idle > path,
+.pele .idle > polygon,
+.pele .idle > circle,
+.pele .idle > ellipse {
+  fill: var(--hd-idle-bg) !important;
+  stroke: var(--hd-idle) !important;
+  stroke-dasharray: 4 3;
+}
+.pele .live .pele-label {
+  fill: var(--hd-live);
+  font-weight: 600;
+}
+.pele .wait .pele-label {
+  fill: var(--warning-foreground, var(--hd-wait));
+  font-weight: 600;
+}
+.pele .ok .pele-label {
+  fill: var(--success-foreground, var(--hd-ok));
+  font-weight: 600;
+}
+.pele .fail .pele-label {
+  fill: var(--destructive-foreground, var(--hd-fail));
+  font-weight: 600;
+}
+.pele .idle .pele-label {
+  fill: var(--hd-idle);
+}
