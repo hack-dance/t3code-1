@@ -1,9 +1,13 @@
 import type { UsageTokenTotals } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import {
+  parseTimestampMs,
   tokenCount,
   totalTokens,
   type ProviderUsageReader,
@@ -198,19 +202,152 @@ export const grokUsageFormat: TranscriptUsageFormat<void> = {
   parseProjected: (projected) => parseGrokRecord(projected),
 };
 
-export const grokUsageReader: ProviderUsageReader<GrokSettings, Path.Path> = {
-  kind: "transcripts",
-  provider: "grok",
-  format: grokUsageFormat,
-  directories: Effect.fn("grokUsageReader.directories")(function* ({ environment }) {
-    const path = yield* Path.Path;
-    const homeDirectory = yield* HostProcess.HomeDirectory;
-    const home = expandHomePath(
-      environment.GROK_HOME?.trim() || path.join(homeDirectory, ".grok"),
-      homeDirectory,
-    );
-    // Sessions also ship multi-megabyte `chat_history` and `events` logs that
-    // never carry usage; only `updates.jsonl` does.
-    return [{ dir: path.resolve(home, "sessions"), fileName: "updates.jsonl" }];
-  }),
-};
+const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+
+function parseGrokUsageDocument(document: unknown, summary: unknown): readonly UsageRecord[] {
+  if (typeof document !== "object" || document === null) return [];
+  const { sessionId, turns } = document as Record<string, unknown>;
+  if (typeof sessionId !== "string" || sessionId.length === 0 || !Array.isArray(turns)) return [];
+  const currentModel =
+    typeof summary === "object" && summary !== null
+      ? (summary as Record<string, unknown>)["current_model_id"]
+      : undefined;
+  const model = typeof currentModel === "string" && currentModel.trim() ? currentModel : "unknown";
+  const records: UsageRecord[] = [];
+  const seen = new Set<number>();
+  for (const turn of turns) {
+    if (typeof turn !== "object" || turn === null) continue;
+    const { turnNumber, endedAt } = turn as Record<string, unknown>;
+    if (
+      typeof turnNumber !== "number" ||
+      !Number.isSafeInteger(turnNumber) ||
+      turnNumber < 1 ||
+      seen.has(turnNumber)
+    )
+      continue;
+    const timestampMs = parseTimestampMs(endedAt);
+    const usage = readGrokUsageTotals(turn);
+    if (timestampMs === null || usage === null) continue;
+    const totals = grokTotalsToUsage(usage);
+    if (totalTokens(totals) === 0) continue;
+    seen.add(turnNumber);
+    records.push({
+      provider: "grok",
+      timestampMs,
+      model,
+      sessionId,
+      totals,
+      reportedCostUsd: grokCostTicksToUsd(usage.costUsdTicks),
+      speed: "standard",
+      dedupeKey: sessionId + ":" + turnNumber,
+    });
+  }
+  return records;
+}
+
+export const grokUsageReader: ProviderUsageReader<GrokSettings, Path.Path | FileSystem.FileSystem> =
+  {
+    kind: "scan",
+    provider: "grok",
+    scan: Effect.fn("grokUsageReader.scan")(function* ({ instances, windowStartMs }) {
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const homeDirectory = yield* HostProcess.HomeDirectory;
+      const roots = new Set(
+        instances.map(({ environment }) =>
+          path.resolve(
+            expandHomePath(
+              environment.GROK_HOME?.trim() || path.join(homeDirectory, ".grok"),
+              homeDirectory,
+            ),
+            "sessions",
+          ),
+        ),
+      );
+      return yield* Effect.forEach(
+        roots,
+        Effect.fn("grokUsageReader.readRoot")(function* (dir) {
+          let partial = false;
+          const readDirectory = Effect.fn("grokUsageReader.readDirectory")(function* (
+            directory: string,
+          ) {
+            return yield* fs.readDirectory(directory).pipe(
+              Effect.catch(() => {
+                partial = true;
+                return Effect.succeed([] as string[]);
+              }),
+            );
+          });
+          const readJson = Effect.fn("grokUsageReader.readJson")(function* (file: string) {
+            return yield* fs.readFileString(file).pipe(
+              Effect.flatMap(decodeJson),
+              Effect.catch(() => {
+                partial = true;
+                return Effect.succeed(null);
+              }),
+            );
+          });
+          const exists = yield* fs.exists(dir).pipe(
+            Effect.catch(() => {
+              partial = true;
+              return Effect.succeed(false);
+            }),
+          );
+          if (!exists)
+            return { dir, files: null, status: partial ? ("partial" as const) : ("ok" as const) };
+          const files: Array<{ path: string; records: readonly UsageRecord[] }> = [];
+          // Current CLI layout is sessions/<encoded cwd>/<session id>. Never read chat/event logs.
+          for (const project of yield* readDirectory(dir)) {
+            const projectDir = path.join(dir, project);
+            for (const session of yield* readDirectory(projectDir)) {
+              const sessionDir = path.join(projectDir, session);
+              const names = yield* readDirectory(sessionDir);
+              let records: readonly UsageRecord[];
+              let file: string;
+              if (names.includes("usage.json")) {
+                file = path.join(sessionDir, "usage.json");
+                // Suppress the previous transcript cache too, including a now-deleted mirror.
+                files.push({ path: path.join(sessionDir, "updates.jsonl"), records: [] });
+                const usage = yield* readJson(file);
+                const summary = names.includes("summary.json")
+                  ? yield* readJson(path.join(sessionDir, "summary.json"))
+                  : null;
+                // Presence owns the session even during a partial write; falling back could bill twice.
+                records = parseGrokUsageDocument(usage, summary);
+              } else if (names.includes("updates.jsonl")) {
+                file = path.join(sessionDir, "updates.jsonl");
+                const legacy: UsageRecord[] = [];
+                yield* fs.stream(file).pipe(
+                  Stream.decodeText(),
+                  Stream.splitLines,
+                  Stream.runForEach((line) =>
+                    Effect.sync(() => {
+                      for (const record of parseGrokLine(line)) {
+                        if (record.timestampMs >= windowStartMs) legacy.push(record);
+                      }
+                    }),
+                  ),
+                  Effect.catch(() => {
+                    partial = true;
+                    return Effect.void;
+                  }),
+                );
+                records = legacy;
+              } else continue;
+              files.push({
+                path: file,
+                records: records.filter((record) => record.timestampMs >= windowStartMs),
+              });
+            }
+          }
+          return {
+            dir,
+            files,
+            status: partial ? ("partial" as const) : ("ok" as const),
+            ...(partial ? { message: "Some Grok history could not be read." } : {}),
+          };
+        }),
+        { concurrency: 4 },
+      );
+    }),
+  };
