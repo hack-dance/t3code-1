@@ -109,7 +109,11 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
-import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
+import {
+  DispatchModeLimit,
+  exceededDispatchModeLimit,
+  isLiveCallerShell,
+} from "./DispatchModeLimit.ts";
 import {
   applyToProjection,
   emptyProjection,
@@ -7698,7 +7702,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const callerThreadId = mcpLimit.callerThreadId;
         const caller =
           callerThreadId === undefined
-            ? mcpLimit
+            ? undefined
             : yield* projectionStore.getThreadShell(callerThreadId).pipe(
                 Effect.mapError(
                   (cause) =>
@@ -7709,9 +7713,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 ),
               );
         if (
-          caller === null ||
-          caller.runtimeMode !== "full-access" ||
-          caller.interactionMode !== "default"
+          (caller !== undefined && !isLiveCallerShell(caller, mcpLimit.callerProviderInstanceId)) ||
+          (caller ?? mcpLimit).runtimeMode !== "full-access" ||
+          (caller ?? mcpLimit).interactionMode !== "default"
         ) {
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,

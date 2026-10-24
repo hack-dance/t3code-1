@@ -147,7 +147,12 @@ export const writesThreads = <P, A, E, R>(
       return yield* handle(params).pipe(
         Effect.provideService(DispatchModeLimit, {
           ...caller.limits,
-          ...(caller.caller === undefined ? {} : { callerThreadId: caller.caller.id }),
+          ...(caller.scope.thread === undefined
+            ? {}
+            : {
+                callerThreadId: caller.scope.thread.threadId,
+                callerProviderInstanceId: caller.scope.thread.providerInstanceId,
+              }),
           refused,
         }),
         Effect.catch((error) =>

@@ -1,3 +1,4 @@
+import { isLiveCallerShell } from "../orchestration-v2/DispatchModeLimit.ts";
 import type { ProjectionRecordField } from "../orchestration-v2/ProjectionStore.ts";
 import {
   CommandId,
@@ -110,7 +111,7 @@ export const assertTargetWithinLimits = (
  */
 export function assertLiveCaller({ caller, scope }: Caller) {
   if (caller === undefined) return Effect.void;
-  return OrchestrationMcp.isLiveCallerShell(caller, scope.thread?.providerInstanceId)
+  return isLiveCallerShell(caller, scope.thread?.providerInstanceId)
     ? Effect.void
     : Effect.fail(
         new OrchestratorMcpFailure({
