@@ -2372,8 +2372,36 @@ describe("UsageService", () => {
         });
         const service = yield* UsageService.make;
         assert.strictEqual(totalOutputTokens(yield* service.readSummary(WINDOW)), 17);
+        yield* service.awaitPersisted;
+        const modern = NodePath.join(sessions, "modern", "usage.json");
+        const legacy = NodePath.join(sessions, "legacy", "updates.jsonl");
+        yield* Effect.promise(async () => {
+          const contents = await NodeFSP.readFile(modern, "utf8");
+          await NodeFSP.writeFile(modern, contents.replace('"outputTokens":7', '"outputTokens":9'));
+          await NodeFSP.utimes(modern, mtimeMs / 1000 + 1, mtimeMs / 1000 + 1);
+          const previous = await NodeFSP.readFile(legacy, "utf8");
+          await NodeFSP.writeFile(
+            legacy,
+            previous +
+              previous
+                .replace('"prompt_id":"prompt"', '"prompt_id":"second"')
+                .replace('"outputTokens":5', '"outputTokens":6'),
+          );
+          await NodeFSP.mkdir(NodePath.join(sessions, "new"));
+          await NodeFSP.writeFile(
+            NodePath.join(sessions, "new", "usage.json"),
+            contents.replace('"modern"', '"new"'),
+          );
+        });
         const restarted = yield* UsageService.make;
-        assert.strictEqual(totalOutputTokens(yield* restarted.readSummary(WINDOW)), 17);
+        assert.strictEqual(totalOutputTokens(yield* restarted.readSummary(WINDOW)), 32);
+        // A narrow scan must not replace retained history with only that window's records.
+        yield* restarted.readSummary(NARROW_WINDOW);
+        yield* restarted.awaitPersisted;
+        yield* Effect.promise(() => NodeFSP.rename(sessions, NodePath.join(home, "archived-grok")));
+        assert.strictEqual(totalOutputTokens(yield* restarted.readSummary(WINDOW)), 32);
+        const deleted = yield* UsageService.make;
+        assert.strictEqual(totalOutputTokens(yield* deleted.readSummary(WINDOW)), 32);
       }).pipe(
         Effect.provide(layerService({ prefix: "usage-service-grok-migration", home, settings })),
       );

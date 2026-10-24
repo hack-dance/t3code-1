@@ -103,7 +103,12 @@ export interface ProviderUsageScan {
   readonly message?: string;
   readonly action?: UsageSource["action"];
   readonly files:
-    | readonly { readonly path: string; readonly records: readonly UsageRecord[] }[]
+    | readonly {
+        readonly path: string;
+        readonly records: readonly UsageRecord[];
+        /** Complete retained history for a local file, safe to persist after deletion. */
+        readonly cache?: { readonly size: number; readonly mtimeMs: number };
+      }[]
     | null;
   readonly refreshing?: true;
 }

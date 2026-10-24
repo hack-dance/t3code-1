@@ -2,6 +2,7 @@ import type { UsageTokenTotals } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -11,6 +12,7 @@ import {
   tokenCount,
   totalTokens,
   type ProviderUsageReader,
+  type ProviderUsageScan,
   type TranscriptUsageFormat,
   type UsageRecord,
 } from "@t3tools/provider-core/server/usage";
@@ -292,7 +294,7 @@ export const grokUsageReader: ProviderUsageReader<GrokSettings, Path.Path | File
   {
     kind: "scan",
     provider: "grok",
-    scan: Effect.fn("grokUsageReader.scan")(function* ({ instances, windowStartMs }) {
+    scan: Effect.fn("grokUsageReader.scan")(function* ({ instances, retentionCutoffMs }) {
       const path = yield* Path.Path;
       const fs = yield* FileSystem.FileSystem;
       const homeDirectory = yield* HostProcess.HomeDirectory;
@@ -338,20 +340,42 @@ export const grokUsageReader: ProviderUsageReader<GrokSettings, Path.Path | File
           );
           if (!exists)
             return { dir, files: null, status: partial ? ("partial" as const) : ("ok" as const) };
-          const files: Array<{ path: string; records: readonly UsageRecord[] }> = [];
+          const files: NonNullable<ProviderUsageScan["files"]>[number][] = [];
           // Current CLI layout is sessions/<encoded cwd>/<session id>.
           for (const project of yield* readDirectory(dir)) {
             const projectDir = path.join(dir, project);
             for (const session of yield* readDirectory(projectDir)) {
               const sessionDir = path.join(projectDir, session);
               const names = yield* readDirectory(sessionDir);
+              if (!names.includes("usage.json") && !names.includes("updates.jsonl")) continue;
               let records: readonly UsageRecord[];
               let file: string;
+              let readable = true;
+              const usagePath = path.join(
+                sessionDir,
+                names.includes("usage.json") ? "usage.json" : "updates.jsonl",
+              );
+              const info = yield* fs.stat(usagePath).pipe(Effect.orElseSucceed(() => null));
+              const cache =
+                info === null
+                  ? undefined
+                  : {
+                      size: Number(info.size),
+                      mtimeMs: Option.getOrElse(
+                        Option.map(info.mtime, (mtime) => mtime.getTime()),
+                        () => 0,
+                      ),
+                    };
               if (names.includes("usage.json")) {
                 file = path.join(sessionDir, "usage.json");
                 // Suppress the previous transcript cache too, including a now-deleted mirror.
-                files.push({ path: path.join(sessionDir, "updates.jsonl"), records: [] });
+                files.push({
+                  path: path.join(sessionDir, "updates.jsonl"),
+                  records: [],
+                  ...(cache === undefined ? {} : { cache }),
+                });
                 const usage = yield* readJson(file);
+                readable = usage !== null;
                 const summary = names.includes("summary.json")
                   ? yield* readJson(path.join(sessionDir, "summary.json"))
                   : null;
@@ -378,12 +402,13 @@ export const grokUsageReader: ProviderUsageReader<GrokSettings, Path.Path | File
                   Stream.runForEach((line) =>
                     Effect.sync(() => {
                       for (const record of parseGrokLine(line)) {
-                        if (record.timestampMs >= windowStartMs) legacy.push(record);
+                        if (record.timestampMs >= retentionCutoffMs) legacy.push(record);
                       }
                     }),
                   ),
                   Effect.catch(() => {
                     partial = true;
+                    readable = false;
                     return Effect.void;
                   }),
                 );
@@ -391,7 +416,8 @@ export const grokUsageReader: ProviderUsageReader<GrokSettings, Path.Path | File
               } else continue;
               files.push({
                 path: file,
-                records: records.filter((record) => record.timestampMs >= windowStartMs),
+                records: records.filter((record) => record.timestampMs >= retentionCutoffMs),
+                ...(readable && cache !== undefined ? { cache } : {}),
               });
             }
           }
