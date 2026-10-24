@@ -313,6 +313,58 @@ it.effect(
   },
 );
 
+it.effect("rejects unsupported cancellation before dispatch and still allows declining", () => {
+  const harness = pendingRequestHarness({}, ProviderInstanceId.make("muse"));
+  const invocation = {
+    ...scope,
+    thread: { ...scope.thread!, providerInstanceId: ProviderInstanceId.make("muse") },
+  };
+  harness.items.splice(
+    0,
+    harness.items.length,
+    ...harness.items.map((item) =>
+      item.type === "approval_request"
+        ? {
+            ...item,
+            options: [
+              { decision: "accept" as const, label: "Accept" },
+              { decision: "decline" as const, label: "Decline" },
+            ],
+          }
+        : item,
+    ),
+  );
+  return Effect.gen(function* () {
+    const result = yield* callPendingTool(
+      "t3_pending_request_respond",
+      { requestId: "request:permission", decision: "cancel" },
+      invocation,
+    );
+    expect(declaredFailure(result)).toMatchObject({
+      code: "invalid_request",
+      message: "This approval does not support the requested decision.",
+    });
+    expect(harness.dispatched).toEqual([]);
+    const pending = yield* callPendingTool("t3_pending_request_list", {}, invocation);
+    expect(pending.structuredContent).toMatchObject({
+      requestIds: expect.arrayContaining(["request:permission"]),
+    });
+    const declined = yield* callPendingTool(
+      "t3_pending_request_respond",
+      { requestId: "request:permission", decision: "decline" },
+      invocation,
+    );
+    expect(declined.isError).not.toBe(true);
+    expect(harness.dispatched).toEqual([
+      expect.objectContaining({
+        type: "runtime-request.respond",
+        requestId: "request:permission",
+        decision: "decline",
+      }),
+    ]);
+  }).pipe(Effect.provide(harness.layer));
+});
+
 it.effect("rejects unsupported elicitation grants without consuming the pending request", () => {
   const harness = pendingRequestHarness();
   const payload = {
