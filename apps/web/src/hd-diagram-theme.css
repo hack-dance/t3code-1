@@ -135,15 +135,15 @@
   font-weight: 600;
 }
 .pele .wait .pele-label {
-  fill: var(--hd-wait);
+  fill: var(--warning-foreground, var(--hd-wait));
   font-weight: 600;
 }
 .pele .ok .pele-label {
-  fill: var(--hd-ok);
+  fill: var(--success-foreground, var(--hd-ok));
   font-weight: 600;
 }
 .pele .fail .pele-label {
-  fill: var(--hd-fail);
+  fill: var(--destructive-foreground, var(--hd-fail));
   font-weight: 600;
 }
 .pele .idle .pele-label {

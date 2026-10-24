@@ -243,6 +243,9 @@ function diagramImageUrl(svg: SVGSVGElement): string {
     if (value) element.style.setProperty(name, value);
   }
   inlineHouseStyles(svg, element);
+  // Shapes use rx: var(--_r), which resolves from --pele-radius set by the house theme.
+  const radius = computed.getPropertyValue("--pele-radius").trim();
+  if (radius) element.style.setProperty("--pele-radius", radius);
   element.style.maxWidth = "none";
   element.style.backgroundColor = getComputedStyle(document.body).backgroundColor;
   if (expandedImageUrl) URL.revokeObjectURL(expandedImageUrl);
