@@ -1,0 +1,49 @@
+/* Hack Dance house style for Pele (Mermaid) diagrams.
+   Source of truth: roodboi/machine files/pele/hack-dance-theme.css. Keep the
+   series palette here in sync with it.
+
+   Tweak the --hd-diagram-* knobs. Neutral knobs are unset by default, so
+   diagrams follow the active T3 theme tokens in light and dark; set one to
+   pin a color. Pele reads its colors through --pele-*, so a theme change
+   recolors diagrams without re-rendering. */
+:root {
+  --hd-diagram-series-1: #e4572e;
+  --hd-diagram-series-2: #2e86ab;
+  --hd-diagram-series-3: #7b4fd6;
+  --hd-diagram-series-4: #17a398;
+  --hd-diagram-series-5: #d99a1e;
+  --hd-diagram-series-6: #c2304a;
+  --hd-diagram-series-7: #4f7a3a;
+  --hd-diagram-series-8: #6b7280;
+}
+
+.dark {
+  --hd-diagram-series-1: #ff8a5c;
+  --hd-diagram-series-2: #5fb4dc;
+  --hd-diagram-series-3: #a98bff;
+  --hd-diagram-series-4: #4fd1c0;
+  --hd-diagram-series-5: #f5c15a;
+  --hd-diagram-series-6: #ff6b81;
+  --hd-diagram-series-7: #8cc56c;
+  --hd-diagram-series-8: #a3aab5;
+}
+
+.pele {
+  --pele-bg: var(--hd-diagram-bg, var(--background));
+  --pele-fg: var(--hd-diagram-fg, var(--foreground));
+  --pele-muted: var(--hd-diagram-muted, var(--muted-foreground));
+  --pele-line: var(--hd-diagram-line, var(--muted-foreground));
+  --pele-surface: var(--hd-diagram-surface, var(--secondary));
+  --pele-surface-alt: var(--hd-diagram-surface-alt, var(--accent));
+  --pele-border: var(--hd-diagram-border, color-mix(in srgb, var(--foreground) 28%, transparent));
+  --pele-accent: var(--hd-diagram-accent, var(--primary));
+  --pele-critical: var(--hd-diagram-critical, var(--destructive));
+  --pele-series-1: var(--hd-diagram-series-1);
+  --pele-series-2: var(--hd-diagram-series-2);
+  --pele-series-3: var(--hd-diagram-series-3);
+  --pele-series-4: var(--hd-diagram-series-4);
+  --pele-series-5: var(--hd-diagram-series-5);
+  --pele-series-6: var(--hd-diagram-series-6);
+  --pele-series-7: var(--hd-diagram-series-7);
+  --pele-series-8: var(--hd-diagram-series-8);
+}

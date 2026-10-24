@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./hd-diagram-theme.css";
 
 @custom-variant dark (&:is(.dark, .dark *));
 @custom-variant light (&:not(.dark, .dark *));
@@ -1727,20 +1728,6 @@ code {
 :root {
   --diffs-font-family: var(--font-mono);
   --diffs-header-font-family: var(--font-sans);
-}
-
-/* Pele diagrams read their colors through these, so a theme change recolors
-   them without re-rendering. */
-.pele {
-  --pele-bg: var(--background);
-  --pele-fg: var(--foreground);
-  --pele-muted: var(--muted-foreground);
-  --pele-line: var(--muted-foreground);
-  --pele-surface: var(--secondary);
-  --pele-surface-alt: var(--accent);
-  --pele-border: color-mix(in srgb, var(--foreground) 28%, transparent);
-  --pele-accent: var(--primary);
-  --pele-critical: var(--destructive);
 }
 
 /* Window drag region (frameless titlebar) */

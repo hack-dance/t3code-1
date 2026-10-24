@@ -4,6 +4,7 @@ import { use, useLayoutEffect, useRef, useState } from "react";
 
 import { serializeCodeBlockToMarkdown } from "../../markdown-clipboard";
 import { Button } from "../ui/button";
+import { PELE_SAFE_OPTIONS } from "./peleOptions";
 
 type Pele = typeof import("pele/lazy");
 type PeleLoad = { readonly status: "loaded"; readonly pele: Pele } | { readonly status: "failed" };
@@ -239,8 +240,7 @@ export function MermaidDiagram({
     const container = containerRef.current;
     if (load.status !== "loaded" || !container) return;
     const mounted = load.pele.mount(container, trimmedSource, {
-      links: false,
-      images: false,
+      ...PELE_SAFE_OPTIONS,
       zoom: false,
       // Keep the author's direction; a wide diagram scales down to fit instead of turning vertical.
       autoDirection: false,
@@ -302,20 +302,22 @@ function DiagramError({
 }) {
   return (
     <div>
+      <pre
+        data-thread-find-ignore
+        className="mt-0 mb-2 overflow-auto font-mono text-xs whitespace-pre-wrap"
+      >
+        {source}
+      </pre>
       <div className="flex items-center justify-between gap-2">
-        <p className="m-0 text-xs text-destructive">Unable to render diagram: {message}</p>
+        <p className="m-0 text-xs whitespace-pre-wrap text-destructive" data-mermaid-error="">
+          Unable to render diagram: {message}
+        </p>
         {onRetry ? (
           <Button type="button" variant="ghost" size="xs" onClick={onRetry}>
             Retry
           </Button>
         ) : null}
       </div>
-      <pre
-        data-thread-find-ignore
-        className="mt-2 mb-0 overflow-auto font-mono text-xs whitespace-pre-wrap"
-      >
-        {source}
-      </pre>
     </div>
   );
 }
