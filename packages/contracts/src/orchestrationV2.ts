@@ -1856,6 +1856,10 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   lastErrorCode: Schema.optional(Schema.NullOr(Schema.String)),
   usageLimitResetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   pendingRuntimeRequest: Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummary),
+  /** Independent of questions; absent when connected to an older server. */
+  pendingApprovalRequest: Schema.optional(
+    Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummary),
+  ),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummary),
   latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),
   /**
@@ -2382,6 +2386,9 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pendingRuntimeRequest: Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummaryJson),
+  pendingApprovalRequest: Schema.optional(
+    Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummaryJson),
+  ),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummaryJson),
   latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   latestUserAuthoredMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),

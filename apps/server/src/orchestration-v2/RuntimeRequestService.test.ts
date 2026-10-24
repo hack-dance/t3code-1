@@ -83,3 +83,43 @@ it.effect("rejects expired runtime requests before invoking the live adapter", (
     assert.equal(respondToRuntimeRequest.mock.calls.length, 0);
   }).pipe(Effect.provide(layerTest));
 });
+
+it.effect("delivers only the persisted decline for an expired approval", () => {
+  const threadId = ThreadId.make("thread-expired-decline");
+  const requestId = RuntimeRequestId.make("expired-decline");
+  const providerSessionId = ProviderSessionId.make("session-expired-decline");
+  const respondToRuntimeRequest = vi.fn(() => Effect.void);
+  const layerTest = RuntimeRequestService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getRuntimeRequest: () =>
+            Effect.succeed({
+              id: requestId,
+              nodeId: NodeId.make("node"),
+              providerTurnId: null,
+              nativeRequestRef: null,
+              kind: "command",
+              status: "expired",
+              decision: "decline",
+              responseCapability: { type: "live", providerSessionId },
+              createdAt: DateTime.makeUnsafe(0),
+              resolvedAt: DateTime.makeUnsafe(4 * 60 * 60 * 1000),
+            }),
+        }),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          get: () => Effect.succeed(Option.some({ respondToRuntimeRequest } as never)),
+        }),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
+    const input = { threadId, requestId, providerSessionId };
+    yield* service.respond({ ...input, decision: "decline" });
+    assert.equal(respondToRuntimeRequest.mock.calls.length, 1);
+    const rejected = yield* service.respond({ ...input, decision: "accept" }).pipe(Effect.flip);
+    assert.equal(rejected.reason, "request-not-ready");
+    assert.equal(respondToRuntimeRequest.mock.calls.length, 1);
+  }).pipe(Effect.provide(layerTest));
+});

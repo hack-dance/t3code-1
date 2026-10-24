@@ -1106,6 +1106,31 @@ const assertProjectScopedShells = Effect.fn("assertProjectScopedShells")(functio
 });
 
 it.layer(layerTest)("ProjectionStoreV2", (it) => {
+  it.effect("uses an indexed deadline range for the approval expiry sweep", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const { statements, tracer } = traceSqlStatements();
+      yield* store.getExpiredApprovalCandidates(now).pipe(Effect.withTracer(tracer));
+      const statement = statements.find((query) =>
+        query.includes("SELECT request.thread_id, request.runtime_request_id"),
+      );
+      assert.isDefined(statement);
+      const plan = yield* sql.unsafe<{ readonly detail: string }>(
+        `EXPLAIN QUERY PLAN ${statement}`,
+      );
+      assert.isTrue(
+        plan.some(({ detail }) =>
+          detail.includes(
+            "SEARCH request USING INDEX orchestration_v2_projection_runtime_requests_pending_expiry_idx (created_at<?)",
+          ),
+        ),
+      );
+      assert.isFalse(plan.some(({ detail }) => detail.includes("USE TEMP B-TREE FOR ORDER BY")));
+    }),
+  );
+
   // regression: #21969 keep corrupt plan JSON in the typed read error
   it.effect("returns a typed read error for malformed stored plan JSON", () =>
     Effect.gen(function* () {
@@ -2771,6 +2796,28 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.isNull(shell?.latestRunCompletedAt);
 
       const requestId = RuntimeRequestId.make("request:projection-shell-question");
+      const approvalId = RuntimeRequestId.make("request:projection-shell-approval");
+      const approvalCreatedAt = DateTime.subtract(now, { seconds: 1 });
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-shell-approval"),
+        type: "runtime-request.updated",
+        threadId,
+        occurredAt: approvalCreatedAt,
+        payload: {
+          id: approvalId,
+          nodeId: rootNodeId,
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "command",
+          status: "pending",
+          responseCapability: {
+            type: "live",
+            providerSessionId: ProviderSessionId.make("session:question"),
+          },
+          createdAt: approvalCreatedAt,
+          resolvedAt: null,
+        },
+      });
       for (const [responseCapability, blocking] of [
         [{ type: "message" }, false],
         [{ type: "live", providerSessionId: ProviderSessionId.make("session:question") }, true],
@@ -2809,7 +2856,30 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             createdAt: now,
             blocking,
           });
+          assert.deepEqual(questionShell.pendingApprovalRequest, {
+            id: approvalId,
+            kind: "command",
+            createdAt: approvalCreatedAt,
+            blocking: true,
+          });
         }
+      }
+      const approval = yield* projectionStore.getRuntimeRequest(threadId, approvalId);
+      assert.isDefined(approval);
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-shell-approval-resolved"),
+        type: "runtime-request.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...approval!, status: "resolved", resolvedAt: now, decision: "accept" },
+      });
+      const resolvedProjection = yield* projectionStore.getThreadProjection(threadId);
+      for (const resolvedShell of [
+        yield* projectionStore.getThreadShell(threadId),
+        ProjectionStore.threadShellFromProjection(resolvedProjection),
+      ]) {
+        assert.isNull(resolvedShell?.pendingApprovalRequest);
+        assert.equal(resolvedShell?.pendingRuntimeRequest?.id, requestId);
       }
 
       yield* projectionStore.apply({

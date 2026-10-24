@@ -128,6 +128,9 @@ function workEntryReadPaths(entry: WorkLogEntry, workspaceRoot: string | undefin
 
 export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string | undefined) {
   if (entry.itemType === "system_notice") return entry.label;
+  if (entry.itemType === "approval_request" && entry.toolLifecycleStatus === "stopped") {
+    return entry.label;
+  }
   if (entry.itemType === "reasoning" || entry.tone === "thinking") {
     const thought = entry.detail?.trim().replace(/\s+/g, " ");
     return thought || entry.label;

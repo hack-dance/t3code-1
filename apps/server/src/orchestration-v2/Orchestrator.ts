@@ -7666,20 +7666,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       const now = yield* DateTime.now;
-      // MCP callers have a grant deadline; interactive clients can still answer old prompts.
       const mcpLimit = yield* DispatchModeLimit;
-      const expiresAt = mcpLimit === undefined ? null : approvalRequestExpiresAt(runtimeRequest);
+      const expiresAt = approvalRequestExpiresAt(runtimeRequest);
       if (
         expiresAt !== null &&
-        DateTime.toEpochMillis(now) >= expiresAt &&
-        command.decision !== "decline" &&
-        command.decision !== "cancel"
+        DateTime.toEpochMillis(now) >= expiresAt
       ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause:
-            "This approval expired after 4 hours. Decline or cancel it, then request a new approval in the thread.",
+            "This approval expired after 4 hours. Request a new approval in the thread.",
         });
       }
       const granting =
