@@ -80,6 +80,7 @@ describe("review tool permissions", () => {
   });
 
   it.each([
+    "gh api https://external.example.com/charge",
     "gh api --paginate graphql",
     "gh api --jq data graphql",
     "git show --format '%GG' HEAD",
