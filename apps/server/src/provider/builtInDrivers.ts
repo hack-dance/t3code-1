@@ -61,6 +61,7 @@ export const BUILT_IN_USAGE_DRIVERS: ReadonlyArray<
   PiDriver,
   MuseDriver,
   OpenCodeDriver,
+  MuseDriver,
   AntigravityDriver,
   CursorDriver,
 ];

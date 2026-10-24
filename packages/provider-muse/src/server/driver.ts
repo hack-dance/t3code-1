@@ -22,6 +22,8 @@ import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEve
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import { enrichMuseSnapshot, latestMuseVersion, museMaintenance } from "./maintenance.ts";
 import { makeMuseEnvironment } from "./sdk.ts";
+import { museUsageReader } from "./usage.ts";
+import type * as MuseUsageHome from "./MuseUsageHome.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
@@ -39,8 +41,6 @@ import {
 } from "@t3tools/provider-core/server/snapshotSettings";
 import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
 
-import { museUsageReader } from "./usage.ts";
-
 const DRIVER_KIND = ProviderDriverKind.make("muse");
 const decodeMuseSettings = Schema.decodeSync(MuseSettings);
 
@@ -55,11 +55,15 @@ export type MuseDriverEnv =
   | Path.Path
   | ProviderEventLoggers.ProviderEventLoggers;
 
-export const MuseDriver: ProviderDriver<MuseSettings, MuseDriverEnv, Path.Path> = {
+export const MuseDriver: ProviderDriver<
+  MuseSettings,
+  MuseDriverEnv,
+  Path.Path | MuseUsageHome.MuseUsageHome
+> = {
   driverKind: DRIVER_KIND,
   metadata: { displayName: "Muse Code", supportsMultipleInstances: true },
-  configSchema: MuseSettings,
   usage: museUsageReader,
+  configSchema: MuseSettings,
   defaultConfig: () => decodeMuseSettings({}),
   create: Effect.fn("MuseDriver.create")(function* ({
     instanceId,

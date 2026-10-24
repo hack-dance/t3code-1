@@ -176,6 +176,7 @@ describe("scan cache round trip", () => {
       original.set("/gone-codex.jsonl", {
         ...original.get("/gone.jsonl")!,
         provider: "codex",
+        malformedRecords: 1,
         records: [record({ provider: "codex", speed: "fast", dedupeKey: null })],
         position: position({
           state: {
@@ -199,6 +200,11 @@ describe("scan cache round trip", () => {
         malformedRecords: 3,
         position: position({ state: { sessionId: "session-a" } }),
       });
+      const cleanCodex = {
+        ...original.get("/gone-codex.jsonl")!,
+        malformedRecords: 0,
+      };
+      original.set("/clean-codex.jsonl", cleanCodex);
       const encoded = encodeScanCache(original);
       const entry = encoded.files["/gone.jsonl"]!;
       const legacy = {
@@ -224,6 +230,11 @@ describe("scan cache round trip", () => {
       expect(restored.get("/gone.jsonl")).toEqual(original.get("/gone.jsonl"));
       expect(restored.get("/gone-codex.jsonl")).toEqual({
         ...original.get("/gone-codex.jsonl"),
+        size: -1,
+        position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+      });
+      expect(restored.get("/clean-codex.jsonl")).toEqual({
+        ...cleanCodex,
         size: -1,
         position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
       });
