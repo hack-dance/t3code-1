@@ -82,38 +82,50 @@
 }
 .pele .pele-node > rect,
 .pele .pele-node > path,
-.pele .pele-node > polygon {
+.pele .pele-node > polygon,
+.pele .pele-node > circle,
+.pele .pele-node > ellipse {
   stroke-width: 1.2px;
 }
 
 /* house semantic classes */
 .pele .live > rect,
 .pele .live > path,
-.pele .live > polygon {
+.pele .live > polygon,
+.pele .live > circle,
+.pele .live > ellipse {
   fill: var(--hd-live-bg) !important;
   stroke: var(--hd-live) !important;
 }
 .pele .wait > rect,
 .pele .wait > path,
-.pele .wait > polygon {
+.pele .wait > polygon,
+.pele .wait > circle,
+.pele .wait > ellipse {
   fill: var(--hd-wait-bg) !important;
   stroke: var(--hd-wait) !important;
 }
 .pele .ok > rect,
 .pele .ok > path,
-.pele .ok > polygon {
+.pele .ok > polygon,
+.pele .ok > circle,
+.pele .ok > ellipse {
   fill: var(--hd-ok-bg) !important;
   stroke: var(--hd-ok) !important;
 }
 .pele .fail > rect,
 .pele .fail > path,
-.pele .fail > polygon {
+.pele .fail > polygon,
+.pele .fail > circle,
+.pele .fail > ellipse {
   fill: var(--hd-fail-bg) !important;
   stroke: var(--hd-fail) !important;
 }
 .pele .idle > rect,
 .pele .idle > path,
-.pele .idle > polygon {
+.pele .idle > polygon,
+.pele .idle > circle,
+.pele .idle > ellipse {
   fill: var(--hd-idle-bg) !important;
   stroke: var(--hd-idle) !important;
   stroke-dasharray: 4 3;

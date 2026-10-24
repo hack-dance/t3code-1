@@ -204,6 +204,37 @@ let expandedImageUrl: string | null = null;
  * A blob URL, unlike a data URL, passes the desktop connect-src policy that media
  * save and copy actions fetch through.
  */
+// The house theme (hd-diagram-theme.css) styles shapes and labels from the page
+// stylesheet, which a detached SVG image cannot see. Copy the resolved
+// presentation values onto the clone so expanded/saved diagrams keep them.
+const HOUSE_STYLED_SELECTOR = "rect, path, polygon, circle, ellipse, line, polyline, text, tspan";
+const HOUSE_STYLED_PROPERTIES = [
+  "fill",
+  "stroke",
+  "stroke-width",
+  "stroke-dasharray",
+  "stroke-linecap",
+  "font-family",
+  "font-size",
+  "font-weight",
+  "letter-spacing",
+] as const;
+
+function inlineHouseStyles(source: SVGSVGElement, clone: SVGSVGElement): void {
+  const from = source.querySelectorAll<SVGElement>(HOUSE_STYLED_SELECTOR);
+  const to = clone.querySelectorAll<SVGElement>(HOUSE_STYLED_SELECTOR);
+  if (from.length !== to.length) return;
+  from.forEach((node, index) => {
+    const target = to[index];
+    if (!target) return;
+    const computed = getComputedStyle(node);
+    for (const name of HOUSE_STYLED_PROPERTIES) {
+      const value = computed.getPropertyValue(name).trim();
+      if (value) target.style.setProperty(name, value);
+    }
+  });
+}
+
 function diagramImageUrl(svg: SVGSVGElement): string {
   const element = svg.cloneNode(true) as SVGSVGElement;
   const computed = getComputedStyle(svg);
@@ -211,6 +242,7 @@ function diagramImageUrl(svg: SVGSVGElement): string {
     const value = computed.getPropertyValue(name).trim();
     if (value) element.style.setProperty(name, value);
   }
+  inlineHouseStyles(svg, element);
   element.style.maxWidth = "none";
   element.style.backgroundColor = getComputedStyle(document.body).backgroundColor;
   if (expandedImageUrl) URL.revokeObjectURL(expandedImageUrl);
