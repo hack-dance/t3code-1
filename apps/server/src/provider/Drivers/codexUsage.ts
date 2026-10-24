@@ -186,9 +186,14 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   if (typeof info !== "object" || info === null) return null;
   const infoRecord = info as Record<string, unknown>;
 
-  // Codex may re-emit these counters after the model or timestamp becomes available.
+  // A skipped request leaves an unknown baseline. Do not let it suppress a later
+  // re-emission or make the next valid cumulative delta look inconsistent.
   const timestampMs = parseTimestampMs(record["timestamp"]);
-  if (timestampMs === null || state.model.length === 0) return null;
+  if (timestampMs === null || state.model.length === 0) {
+    state.lastUsageSignature = null;
+    state.lastCumulativeUsage = null;
+    return null;
+  }
 
   const last = readCodexTokenUsage(infoRecord["last_token_usage"]);
   const rawCumulative = infoRecord["total_token_usage"];
@@ -216,6 +221,8 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   if (cumulative !== null) state.lastCumulativeUsage = cumulative;
   if (last === null || (hasCumulative && cumulative === null)) {
     state.malformedRecords += 1;
+    state.lastUsageSignature = null;
+    state.lastCumulativeUsage = cumulative;
     return null;
   }
 
@@ -223,6 +230,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   // post-compaction marker whose total is the new context size (its cumulative may reset to zero).
   if (last.input_tokens + last.output_tokens === 0) {
     state.lastUsageSignature = null;
+    state.lastCumulativeUsage = cumulative;
     return null;
   }
 
@@ -236,6 +244,8 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
 
   if (last.total_tokens !== last.input_tokens + last.output_tokens) {
     state.malformedRecords += 1;
+    state.lastUsageSignature = null;
+    state.lastCumulativeUsage = cumulative;
     return null;
   }
 
@@ -245,9 +255,14 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
     const restarted = CODEX_USAGE_FIELDS.every((key) => cumulative[key] === last[key]);
     if (
       !restarted &&
-      !CODEX_USAGE_FIELDS.every((key) => cumulative[key] - (previous?.[key] ?? 0) === last[key])
+      !CODEX_USAGE_FIELDS.every((key) =>
+        previous === null
+          ? cumulative[key] >= last[key]
+          : cumulative[key] - previous[key] === last[key],
+      )
     ) {
       state.malformedRecords += 1;
+      state.lastUsageSignature = null;
       return null;
     }
   } else {
@@ -256,6 +271,8 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
     const advanced = advanceCodexUsage(previous, last);
     if (advanced === null) {
       state.malformedRecords += 1;
+      state.lastUsageSignature = null;
+      state.lastCumulativeUsage = null;
       return null;
     }
     state.lastCumulativeUsage = advanced;

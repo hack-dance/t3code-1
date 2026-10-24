@@ -62,6 +62,69 @@ describe("parseCodexLine", () => {
     expect(record?.totals.reasoningTokens).toBe(116);
   });
 
+  it("accepts a valid request after unattributed cumulative history", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(counted(counters(100, 20), counters(100, 20)), state);
+    parseCodexLine(turnContext, state);
+    expect(
+      parseCodexLine(counted(counters(10, 2), counters(110, 22)), state)?.totals.outputTokens,
+    ).toBe(2);
+  });
+
+  it.each(["invalid-request", "invalid-total", "inconsistent", "invalid-request-total"])(
+    "does not suppress a valid legacy request after %s",
+    (kind) => {
+      const state = initialCodexScanState();
+      parseCodexLine(turnContext, state);
+      const request = counters(100, 20);
+      parseCodexLine(counted(request, request), state);
+      const last =
+        kind === "invalid-request"
+          ? null
+          : kind === "invalid-request-total"
+            ? { ...request, total_tokens: 121 }
+            : request;
+      const total = kind === "invalid-total" ? { input_tokens: "bad" } : counters(250, 50);
+      expect(parseCodexLine(counted(last, total), state)).toBeNull();
+      expect(parseCodexLine(counted(request), state)?.totals.outputTokens).toBe(20);
+    },
+  );
+
+  it("recovers after a malformed cumulative snapshot leaves a gap", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    parseCodexLine(counted(counters(100, 20), counters(100, 20)), state);
+    parseCodexLine(counted(counters(10, 2), { input_tokens: "bad" }), state);
+    expect(
+      parseCodexLine(counted(counters(30, 5), counters(140, 27)), state)?.totals.outputTokens,
+    ).toBe(5);
+  });
+
+  it("recovers after a skipped timestamp leaves a cumulative gap", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    parseCodexLine(counted(counters(100, 20), counters(100, 20)), state);
+    parseCodexLine(
+      counted(counters(10, 2), counters(110, 22)).replace("2026-08-01T05:17:49.919Z", "invalid"),
+      state,
+    );
+    expect(
+      parseCodexLine(counted(counters(30, 5), counters(140, 27)), state)?.totals.outputTokens,
+    ).toBe(5);
+  });
+
+  it("resets the baseline at a legacy compaction marker", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    parseCodexLine(counted(counters(100, 20), counters(100, 20)), state);
+    parseCodexLine(counted({ ...counters(0, 0), total_tokens: 500 }), state);
+    expect(state.lastCumulativeUsage).toBeNull();
+    expect(parseCodexLine(counted(counters(10, 2)), state)?.totals.outputTokens).toBe(2);
+    expect(
+      parseCodexLine(counted(counters(20, 3), counters(30, 5)), state)?.totals.outputTokens,
+    ).toBe(3);
+  });
+
   it("skips a repeated token_count so deltas are not double counted", () => {
     const state = initialCodexScanState();
     parseCodexLine(turnContext, state);
