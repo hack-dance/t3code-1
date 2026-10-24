@@ -43,7 +43,13 @@ function safeShell(command: string): boolean {
     )
       return false;
     if (args[1] === "pr") return ["view", "diff", "checks"].includes(args[2] ?? "");
-    if (args[1] !== "api" || args.includes("graphql") || args.includes("/graphql")) return false;
+    if (
+      args[1] !== "api" ||
+      args.includes("graphql") ||
+      args.includes("/graphql") ||
+      args.some((arg) => arg.includes("://"))
+    )
+      return false;
     for (let i = 2; i < args.length; i++) {
       const arg = args[i]!;
       if (arg === "-X" || arg === "--method") {
