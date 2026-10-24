@@ -162,7 +162,7 @@ describe("scan cache round trip", () => {
     expect(restored).toEqual(original);
   });
 
-  it.each([5, 6, 7, 8, 9, 10])(
+  it.each([5, 6, 7, 8, 9, 10, 11])(
     "retains v%s history and compatible positions but invalidates obsolete state",
     (version) => {
       const original = cacheWith([["/gone.jsonl", 100, [record({ speed: "fast" })]]]);
@@ -177,7 +177,7 @@ describe("scan cache round trip", () => {
             speed: "fast",
             sessionId: "session-a",
             lastUsageSignature: null,
-            lastBilledUsageSignature: undefined,
+            lastBilledUsageSignature: version < 11 ? undefined : null,
             sawSessionMeta: true,
             suppressingForkCopies: false,
             forkCopyAnchorMs: 0,

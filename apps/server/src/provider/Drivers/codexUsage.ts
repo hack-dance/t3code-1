@@ -91,7 +91,7 @@ export function initialCodexScanState(): CodexScanState {
     lastUsageSignature: null,
     lastBilledUsageSignature: null,
     lastBilledCumulativeUsage: null,
-    lastCumulativeUsage: null,
+    lastCumulativeUsage: readCodexTokenUsage({ input_tokens: 0, output_tokens: 0 }),
     malformedRecords: 0,
     sawSessionMeta: false,
     modelProvider: "",
@@ -264,7 +264,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
     if (
       !restarted &&
       !CODEX_USAGE_FIELDS.every((key) =>
-        previous === null
+        previous === null || previous.total_tokens === 0
           ? cumulative[key] >= last[key]
           : cumulative[key] - previous[key] === last[key],
       )
@@ -273,14 +273,24 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
       state.lastUsageSignature = null;
       return null;
     }
+    // A legacy request billed across a gap has no cumulative identity yet. Without a
+    // known delta, its re-emission only restores that identity; it is not a new bill.
+    if (
+      state.lastBilledCumulativeUsage === null &&
+      signature === state.lastBilledUsageSignature &&
+      (previous === null || restarted)
+    ) {
+      state.lastBilledCumulativeUsage = cumulative;
+      return null;
+    }
   } else {
     // Recovery can discard the previous signature without making a billed request replay new.
     if (signature === state.lastUsageSignature || signature === state.lastBilledUsageSignature) {
       return null;
     }
-    // Advance expected totals for billed legacy requests so a cumulative re-emission is stale.
-    const advanced = advanceCodexUsage(previous, last);
-    if (advanced === null) {
+    // Legacy deltas cannot fill an unknown gap. Only advance a known baseline.
+    const advanced = previous === null ? null : advanceCodexUsage(previous, last);
+    if (previous !== null && advanced === null) {
       state.malformedRecords += 1;
       state.lastUsageSignature = null;
       state.lastCumulativeUsage = null;

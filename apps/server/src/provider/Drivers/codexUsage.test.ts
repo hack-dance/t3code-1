@@ -62,6 +62,14 @@ describe("parseCodexLine", () => {
     expect(record?.totals.reasoningTokens).toBe(116);
   });
 
+  it("accepts a first cumulative snapshot that includes earlier history", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    expect(
+      parseCodexLine(counted(counters(10, 2), counters(110, 22)), state)?.totals.outputTokens,
+    ).toBe(2);
+  });
+
   it("accepts a valid request after unattributed cumulative history", () => {
     const state = initialCodexScanState();
     parseCodexLine(counted(counters(100, 20), counters(100, 20)), state);
@@ -136,6 +144,80 @@ describe("parseCodexLine", () => {
       );
       expect(outputs).toEqual([20, null, null, 5, 20]);
     });
+  });
+
+  it.each(["invalid-timestamp", "malformed-total"])(
+    "preserves legacy recovery identity and an unknown baseline across %s skips",
+    (kind) => {
+      const state = initialCodexScanState();
+      parseCodexLine(turnContext, state);
+      const skipped =
+        kind === "invalid-timestamp"
+          ? counted(counters(10, 2), counters(110, 22)).replace(
+              "2026-08-01T05:17:49.919Z",
+              "invalid",
+            )
+          : counted(counters(10, 2), { input_tokens: "bad" });
+      const outputs = [
+        counted(counters(100, 20), counters(100, 20)),
+        skipped,
+        counted(counters(30, 5)),
+        skipped,
+        counted(counters(30, 5), counters(140, 27)),
+        counted(counters(10, 2), counters(150, 29)),
+      ].map((line) => parseCodexLine(line, state)?.totals.outputTokens ?? null);
+      expect(outputs).toEqual([20, null, 5, null, null, 2]);
+    },
+  );
+
+  it("deduplicates short replay/skip sequences after legacy recovery without losing new deltas", () => {
+    const request = counters(30, 5);
+    const snapshot = counters(140, 27);
+    const skipped = [
+      counted(counters(10, 2)).replace("2026-08-01T05:17:49.919Z", "invalid"),
+      counted(counters(10, 2), { input_tokens: "bad" }),
+    ];
+    const alphabet = [...skipped, counted(request), counted(request, snapshot)];
+    const sequences = (length: number): string[][] =>
+      length === 0
+        ? [[]]
+        : sequences(length - 1).flatMap((prefix) => alphabet.map((line) => [...prefix, line]));
+
+    for (const initialCumulative of [false, true]) {
+      for (const gap of skipped) {
+        for (const suffix of sequences(4)) {
+          const state = initialCodexScanState();
+          parseCodexLine(turnContext, state);
+          const first = counters(100, 20);
+          const lines = [
+            counted(first, initialCumulative ? first : undefined),
+            gap,
+            counted(request),
+            ...suffix,
+            counted(request, snapshot),
+            counted(request, counters(170, 32)),
+            counted(counters(10, 2)),
+            counted(counters(10, 2), counters(180, 34)),
+          ];
+          expect(
+            lines.map((line) => parseCodexLine(line, state)?.totals.outputTokens ?? null),
+            JSON.stringify(lines),
+          ).toEqual([20, null, 5, null, null, null, null, null, 5, 2, null]);
+        }
+      }
+    }
+  });
+
+  it("bills equal requests when a skipped record supplies a valid cumulative baseline", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const request = counters(30, 5);
+    const outputs = [
+      counted(request),
+      counted(null, counters(40, 7)),
+      counted(request, counters(70, 12)),
+    ].map((line) => parseCodexLine(line, state)?.totals.outputTokens ?? null);
+    expect(outputs).toEqual([5, null, 5]);
   });
 
   it("recovers after a malformed cumulative snapshot leaves a gap", () => {
