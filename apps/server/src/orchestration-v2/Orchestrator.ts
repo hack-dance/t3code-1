@@ -165,6 +165,15 @@ export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDi
   }
 }
 
+export class OrchestratorThreadNotSteerableError extends Schema.TaggedError<OrchestratorThreadNotSteerableError>()(
+  "OrchestratorThreadNotSteerableError",
+  { threadId: ThreadId, cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return `Thread ${this.threadId} cannot accept steering input. Use mode:"queue" for a separate follow-up turn.`;
+  }
+}
+
 export class OrchestratorThreadAlreadyExistsError extends Schema.TaggedError<OrchestratorThreadAlreadyExistsError>()(
   "OrchestratorThreadAlreadyExistsError",
   { commandId: CommandId, threadId: ThreadId },
@@ -285,6 +294,7 @@ function canReplayCommandReceipt(receiptThreadId: ThreadId, commandThreadId: Thr
 export const OrchestratorV2Error = Schema.Union([
   OrchestratorDispatchError,
   OrchestratorThreadAlreadyExistsError,
+  OrchestratorThreadNotSteerableError,
   OrchestratorCommandRejectedError,
   OrchestratorProjectionError,
   OrchestratorDomainEventStreamError,
@@ -5023,7 +5033,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.dispatchMode,
       command.deliveryIntent,
     );
-    if (dispatchMode.type === "steer_active") {
+    if (dispatchMode.type === "steer_active" && command.deliveryIntent !== "steer_or_start") {
       const targetRunId = dispatchMode.targetRunId;
       const target = projection.runs.find((run) => run.id === targetRunId);
       const turn = latestProviderTurnForAttempt(
@@ -5222,7 +5232,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : { scheduledTaskId: command.scheduledTaskId }),
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
         forceRestart: dispatchMode.type === "restart_active",
-      });
+      }).pipe(
+        Effect.mapError((cause) =>
+          command.deliveryIntent === "steer_or_start"
+            ? new OrchestratorThreadNotSteerableError({ threadId: command.threadId, cause })
+            : cause,
+        ),
+      );
       return;
     }
 

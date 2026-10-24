@@ -474,7 +474,10 @@ export type OrchestratorMcpThreadReadResult = typeof OrchestratorMcpThreadReadRe
 export const OrchestratorMcpThreadSendInput = Schema.Struct({
   threadId: ThreadId,
   message: OrchestratorMcpPrompt,
-  mode: Schema.optional(Schema.Literals(["auto", "queue", "steer", "restart"])),
+  mode: Schema.optional(Schema.Literals(["auto", "queue", "steer", "restart"])).annotate({
+    description:
+      "Defaults to auto: start if idle, steer if active, or fail if steering is unavailable. Use queue explicitly for a separate follow-up turn.",
+  }),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
 export type OrchestratorMcpThreadSendInput = typeof OrchestratorMcpThreadSendInput.Type;

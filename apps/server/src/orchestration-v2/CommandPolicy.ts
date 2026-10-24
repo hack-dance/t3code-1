@@ -131,10 +131,10 @@ export function isNativeMaintenanceCommand(message: {
 export function resolveMessageDispatchIntent(
   projection: OrchestrationV2ThreadProjection,
   requestedMode: MessageDispatchMode,
-  deliveryIntent?: "auto" | "steer" | "restart",
+  deliveryIntent?: "auto" | "steer" | "restart" | "steer_or_start",
 ): MessageDispatchMode {
   const mode = resolveDeliveryIntent(projection, requestedMode, deliveryIntent);
-  if (mode.type !== "steer_active") return mode;
+  if (mode.type !== "steer_active" || deliveryIntent === "steer_or_start") return mode;
   // Compaction and sign-out turns cannot take steering input. A message sent
   // while one runs waits in the queue like any other follow-up.
   const target = projection.runs.find((run) => run.id === mode.targetRunId);
@@ -147,7 +147,7 @@ export function resolveMessageDispatchIntent(
 function resolveDeliveryIntent(
   projection: OrchestrationV2ThreadProjection,
   requestedMode: MessageDispatchMode,
-  deliveryIntent?: "auto" | "steer" | "restart",
+  deliveryIntent?: "auto" | "steer" | "restart" | "steer_or_start",
 ): MessageDispatchMode {
   if (deliveryIntent === undefined) return requestedMode;
 
@@ -159,7 +159,7 @@ function resolveDeliveryIntent(
       run.status === "waiting",
   );
   if (activeRun === undefined) return { type: "start_immediately" };
-  if (deliveryIntent === "steer") {
+  if (deliveryIntent === "steer" || deliveryIntent === "steer_or_start") {
     return { type: "steer_active", targetRunId: activeRun.id };
   }
   if (deliveryIntent === "restart") {
