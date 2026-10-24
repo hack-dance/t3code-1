@@ -4810,6 +4810,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         threadId: input.command.threadId,
         request: {
           type: "provider-turn.restart",
+          ...(input.command.type === "message.dispatch" &&
+          input.command.deliveryIntent === "steer_or_start"
+            ? { strictDelivery: true, replacementAttemptId: nextAttempt.id }
+            : {}),
           providerSessionId,
           providerThreadId: providerThread.id,
           providerTurnId: providerTurn.id,
@@ -12169,7 +12173,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       function* (input) {
         const effects = yield* effectOutbox.listByCommandId(input.commandId);
         for (const effect of effects) {
-          if (effect.request.type !== "provider-turn.steer" || !effect.request.strictDelivery)
+          if (
+            (effect.request.type !== "provider-turn.steer" &&
+              effect.request.type !== "provider-turn.restart") ||
+            !effect.request.strictDelivery
+          )
             continue;
           yield* effectOutbox.awaitSettled(effect.id);
           const settled = yield* effectOutbox.get(effect.id);

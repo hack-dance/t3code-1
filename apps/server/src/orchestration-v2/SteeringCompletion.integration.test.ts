@@ -415,6 +415,7 @@ const composerSelection = {
 const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function* (
   name: string,
   canRestart = false,
+  restartOutcome?: "interrupt-failure" | "start-failure" | "success",
 ) {
   const cwd = yield* checkpointWorkspace(name);
   const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
@@ -424,7 +425,7 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
     ...CodexProviderCapabilitiesV2,
     turns: {
       ...CodexProviderCapabilitiesV2.turns,
-      supportsActiveSteering: true,
+      supportsActiveSteering: restartOutcome === undefined,
       supportsSteeringByInterruptRestart: canRestart,
     },
   };
@@ -475,6 +476,15 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
           startTurn: (turn) =>
             Effect.gen(function* () {
               started.push(turn);
+              if (restartOutcome === "start-failure" && started.length > 1) {
+                return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
+                  driver,
+                  threadId: turn.threadId,
+                  providerThreadId: turn.providerThread.id,
+                  runId: turn.runId,
+                  cause: "Replacement start rejected",
+                });
+              }
               yield* Queue.offer(events, {
                 type: "provider_turn.updated",
                 driver,
@@ -499,7 +509,17 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
             Effect.sync(() => {
               steered.push(turn.message.text);
             }),
-          interruptTurn: () => Effect.void,
+          interruptTurn: (turn) =>
+            restartOutcome === "interrupt-failure"
+              ? Effect.fail(
+                  new ProviderAdapter.ProviderAdapterInterruptError({
+                    driver,
+                    providerThreadId: turn.providerThread.id,
+                    providerTurnId: turn.providerTurnId,
+                    cause: "Interrupt rejected",
+                  }),
+                )
+              : Effect.void,
           respondToRuntimeRequest: () => Effect.void,
           readThreadSnapshot: () => Effect.die("unused"),
           rollbackThread: () => Effect.die("unused"),
@@ -1168,4 +1188,105 @@ it.effect.each([false, true])(
         );
       }),
     ),
+);
+
+it.effect.each(
+  (["interrupt-failure", "start-failure", "success"] as const).flatMap((outcome) =>
+    (["auto", "steer"] as const).map((mode) => ({ outcome, mode })),
+  ),
+)("verifies restart-based $mode delivery: $outcome", ({ outcome, mode }) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { layer, startFirstTurn, started } = yield* nextTurnSelectionHarness(
+        `strict-restart-${outcome}`,
+        true,
+        outcome,
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const threadId = yield* startFirstTurn;
+        const before = yield* orchestrator.getThreadProjection(threadId);
+        const run = before.runs[0]!;
+        const turn = before.providerTurns[0]!;
+        const attempt = before.attempts.find((attempt) => attempt.id === run.activeAttemptId)!;
+        const messageId = MessageId.make("message:restart-steer");
+        const accepted = yield* orchestrator.streamDomainEvents.pipe(
+          Stream.filter(
+            (event) => event.type === "message.updated" && event.payload.id === messageId,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+        const sending = yield* threads
+          .sendToThread({
+            projectId: before.thread.projectId,
+            threadId,
+            commandId: CommandId.make("restart-steer"),
+            messageId,
+            text: "Steer via restart",
+            attachments: [],
+            mode,
+            createdBy: "agent",
+            creationSource: "mcp",
+          })
+          .pipe(Effect.exit, Effect.forkScoped);
+        yield* Fiber.join(accepted);
+        if (outcome !== "interrupt-failure") {
+          const sink = yield* EventSink.EventSinkV2;
+          const now = yield* DateTime.now;
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("restart-turn-interrupted"),
+                type: "provider-turn.updated",
+                threadId,
+                runId: run.id,
+                occurredAt: now,
+                payload: { ...turn, status: "interrupted", completedAt: now },
+              },
+              {
+                id: EventId.make("restart-attempt-interrupted"),
+                type: "run-attempt.updated",
+                threadId,
+                runId: run.id,
+                occurredAt: now,
+                payload: { ...attempt, status: "interrupted", completedAt: now },
+              },
+            ],
+          });
+        }
+        yield* worker.drain();
+        const result = yield* Fiber.join(sending);
+        assert.equal(started.length, outcome === "interrupt-failure" ? 1 : 2);
+        if (outcome === "success") {
+          assert.isTrue(Exit.isSuccess(result));
+          if (Exit.isSuccess(result)) {
+            assert.equal(result.value.delivery, "steered");
+            assert.equal(result.value.run.id, run.id);
+          }
+        } else {
+          assert.isTrue(Exit.isFailure(result));
+          if (Exit.isFailure(result)) {
+            const error = Cause.squash(result.cause);
+            assert.instanceOf(error, ThreadManagement.ThreadManagementNoSteerableRunError);
+            assert.include(String(error), threadId);
+            assert.include(String(error), 'mode:"queue"');
+          }
+        }
+      }).pipe(
+        Effect.provide(
+          ThreadManagement.layer.pipe(
+            Layer.provide(ServerSettings.layerTest()),
+            Layer.provide(
+              CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+            ),
+            Layer.provideMerge(layer),
+          ),
+        ),
+      );
+    }),
+  ),
 );
