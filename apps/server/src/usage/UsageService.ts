@@ -532,7 +532,11 @@ export const make = Effect.gen(function* () {
     }
     const base = parsed.resumed && cached !== undefined ? cached.records : [];
     const seen = new Set<string>();
-    const records = dedupeWithinFile([...base, ...parsed.records], seen);
+    const combined = [...base, ...parsed.records];
+    const records = dedupeWithinFile(
+      format.filterRecords?.(combined, parsed.finalState) ?? combined,
+      seen,
+    );
     const tailRecords = dedupeWithinFile(parsed.tailRecords, seen);
 
     return {

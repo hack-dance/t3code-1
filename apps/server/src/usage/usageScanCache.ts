@@ -9,7 +9,7 @@ import * as Schema from "effect/Schema";
 import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
 
-const USAGE_SCAN_CACHE_VERSION = 12 as const;
+const USAGE_SCAN_CACHE_VERSION = 13 as const;
 const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
@@ -313,7 +313,7 @@ export function decodeScanCache(
     // Keep history for deleted rollouts, but re-parse incompatible reducer state.
     // Re-scan Codex history whose old reducer could drop or rebill requests after skipped records.
     const legacy =
-      format.state !== undefined && (version < 6 || (entry.p === "codex" && version < 12));
+      format.state !== undefined && (version < 6 || (entry.p === "codex" && version < 13));
     // A corrupt state disqualifies the entry: resuming with it would attach
     // appended usage to the wrong model or replay fork-copied history.
     if (!legacy && !isValidState.get(entry.p)?.(entry.cs)) continue;
@@ -349,10 +349,12 @@ function makeStateValidators(
 ): ReadonlyMap<UsageProviderKind, (value: unknown) => boolean> {
   return new Map(
     [...formats].map(([provider, format]) => {
-      const isState = format.state === undefined ? undefined : Schema.is(format.state.schema);
+      const isState =
+        format.state === undefined ? undefined : Schema.decodeUnknownExit(format.state.schema);
       return [
         provider,
-        (value: unknown) => value === null || (isState !== undefined && isState(value)),
+        (value: unknown) =>
+          value === null || (isState !== undefined && isState(value)._tag === "Success"),
       ] as const;
     }),
   );

@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "@effect/vitest";
 
 import {
@@ -10,7 +11,13 @@ import {
 import type { UsageRecord } from "@t3tools/provider-core/server/usage";
 
 import { TEST_FORMAT_MAP } from "./usageTestFormats.ts";
-import { initialCodexScanState, parseCodexLine } from "../provider/Drivers/codexUsage.ts";
+import {
+  CodexScanState,
+  initialCodexScanState,
+  parseCodexLine,
+} from "../provider/Drivers/codexUsage.ts";
+
+const encodeCodexState = Schema.encodeSync(CodexScanState);
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
@@ -136,7 +143,7 @@ describe("scan cache round trip", () => {
         pending,
       ],
       tailRecords: [pendingTail],
-      position: position({ state }),
+      position: position({ state: encodeCodexState(state) }),
     });
 
     original.set("/a.jsonl", {
@@ -162,7 +169,7 @@ describe("scan cache round trip", () => {
     expect(restored).toEqual(original);
   });
 
-  it.each([5, 6, 7, 8, 9, 10, 11])(
+  it.each([5, 6, 7, 8, 9, 10, 11, 12])(
     "retains v%s history and compatible positions but invalidates obsolete state",
     (version) => {
       const original = cacheWith([["/gone.jsonl", 100, [record({ speed: "fast" })]]]);

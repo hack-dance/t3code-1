@@ -1,6 +1,15 @@
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "@effect/vitest";
 
-import { codexUsageFormat, initialCodexScanState, parseCodexLine } from "./codexUsage.ts";
+import {
+  CodexScanState,
+  codexUsageFormat,
+  initialCodexScanState,
+  parseCodexLine,
+} from "./codexUsage.ts";
+
+const encodeCodexState = Schema.encodeSync(CodexScanState);
+const decodeCodexState = Schema.decodeUnknownSync(CodexScanState);
 
 describe("parseCodexLine", () => {
   const sessionMeta = JSON.stringify({
@@ -47,6 +56,64 @@ describe("parseCodexLine", () => {
         info: { last_token_usage: last, total_token_usage: total, ...extra },
       },
     });
+
+  it("bills response IDs once, ignores paired counts, and restores dedupe state from JSON", () => {
+    let state = initialCodexScanState();
+    parseCodexLine(sessionMeta, state);
+    parseCodexLine(turnContext, state);
+    const request = counters(100, 20);
+    const modern = (response_id: string) =>
+      JSON.stringify({
+        timestamp: "2026-08-01T05:17:49.919Z",
+        ordinal: 1,
+        type: "token_usage_record",
+        payload: {
+          response_id,
+          session_id: "session",
+          turn_id: "turn",
+          usage: request,
+          turn_token_usage: request,
+          thread_token_usage: request,
+        },
+      });
+    expect(parseCodexLine(modern("response-1"), state)?.totals.outputTokens).toBe(20);
+    expect(parseCodexLine(counted(request, request), state)).toBeNull();
+    const encoded = JSON.parse(JSON.stringify(encodeCodexState(state)));
+    state = decodeCodexState(encoded);
+    expect(parseCodexLine(modern("response-1"), state)).toBeNull();
+    expect(parseCodexLine(modern("response-2"), state)?.totals.outputTokens).toBe(20);
+    expect(parseCodexLine(counted(request, counters(200, 40)), state)).toBeNull();
+  });
+
+  it("does not fall back to count billing after a malformed identified record", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    expect(
+      parseCodexLine(
+        JSON.stringify({ type: "token_usage_record", payload: { usage: null } }),
+        state,
+      ),
+    ).toBeNull();
+    expect(parseCodexLine(counted(counters(100, 20)), state)).toBeNull();
+  });
+
+  it("documents the expected drop of identical legacy requests without cumulative identity", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const request = counters(100, 20);
+    // Two real requests and one replay have identical evidence; prefer underbilling.
+    expect(parseCodexLine(counted(request), state)?.totals.outputTokens).toBe(20);
+    expect(parseCodexLine(counted(request), state)).toBeNull();
+  });
+
+  it("documents the expected drop when a restarted legacy request equals the billed snapshot", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const request = counters(100, 20);
+    // A fresh process can reset to these same counts, indistinguishable from a replay.
+    expect(parseCodexLine(counted(request, request), state)?.totals.outputTokens).toBe(20);
+    expect(parseCodexLine(counted(request, request), state)).toBeNull();
+  });
 
   it("attributes usage to the model from the preceding turn context", () => {
     const state = initialCodexScanState();

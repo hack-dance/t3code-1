@@ -72,6 +72,47 @@ function codexUsageLine(outputTokens: number, secondsOffset: number): string {
 }
 
 describe("readTranscriptRecords resume", () => {
+  it.each([0, Infinity])(
+    "retains only identified Codex usage across persisted resume (threshold %s)",
+    async (streamingThresholdBytes) => {
+      const file = NodePath.join(dir, "modern.jsonl");
+      const modern = (response_id: string) =>
+        JSON.stringify({
+          type: "token_usage_record",
+          timestamp: "2026-08-01T10:00:02Z",
+          payload: { response_id, usage: { input_tokens: 100, output_tokens: 10 } },
+        }) + "\n";
+      await NodeFSP.writeFile(
+        file,
+        codexMetaLine() + codexModelLine("gpt-6-astra") + codexUsageLine(10, 2),
+      );
+      const legacy = await readTranscriptRecords(file, TEST_FORMATS.codex);
+      assert.ok(legacy);
+      await NodeFSP.appendFile(file, modern("r1") + codexUsageLine(10, 3));
+      const first = await readTranscriptRecords(file, TEST_FORMATS.codex, legacy.position, {
+        streamingThresholdBytes,
+      });
+      assert.ok(first);
+      assert.equal(first.resumed, true);
+      const combined = TEST_FORMATS.codex.filterRecords?.(
+        [...legacy.records, ...first.records],
+        first.finalState as Parameters<NonNullable<typeof TEST_FORMATS.codex.filterRecords>>[1],
+      );
+      assert.equal(combined?.length, 1);
+      const persisted = JSON.parse(JSON.stringify(first.position));
+      await NodeFSP.appendFile(file, modern("r1") + modern("r2") + codexUsageLine(10, 4));
+      const second = await readTranscriptRecords(file, TEST_FORMATS.codex, persisted, {
+        streamingThresholdBytes,
+      });
+      assert.ok(second);
+      assert.equal(second.resumed, true);
+      assert.deepEqual(
+        second.records.map((record) => record.dedupeKey),
+        ["r2"],
+      );
+    },
+  );
+
   it.each([
     { mode: "buffered", streamingThresholdBytes: Infinity },
     { mode: "streaming", streamingThresholdBytes: 0 },

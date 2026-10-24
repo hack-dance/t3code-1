@@ -2,6 +2,7 @@ import type { CodexSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import {
   parseTimestampMs,
@@ -65,7 +66,19 @@ function advanceCodexUsage(previous: CodexTokenUsage | null, last: CodexTokenUsa
  * Codex `token_count` events carry no model or service tier, so both are carried forward: the model
  * from the most recent `turn_context`, the tier from the most recent `thread_settings_applied`.
  */
+const ResponseIds = Schema.Array(Schema.String).pipe(
+  Schema.decodeTo(
+    Schema.instanceOf(Set<string>),
+    SchemaTransformation.transform({
+      decode: (ids) => new Set(ids),
+      encode: (ids) => [...ids],
+    }),
+  ),
+);
+
 export const CodexScanState = Schema.Struct({
+  responseIds: ResponseIds,
+  sawUsageRecord: Schema.mutableKey(Schema.Boolean),
   model: Schema.mutableKey(Schema.String),
   speed: Schema.mutableKey(Schema.Literals(["standard", "fast", "ultrafast"])),
   sessionId: Schema.mutableKey(Schema.String),
@@ -85,6 +98,8 @@ export type CodexScanState = typeof CodexScanState.Type;
 
 export function initialCodexScanState(): CodexScanState {
   return {
+    responseIds: new Set(),
+    sawUsageRecord: false,
     model: "",
     speed: "standard",
     sessionId: "",
@@ -123,7 +138,9 @@ function isForkedSessionMeta(payload: Record<string, unknown>): boolean {
 
 /**
  * Cumulative counters validate request deltas. Older events without cumulative counters use
- * normalized consecutive-request deduplication.
+ * normalized consecutive-request deduplication. Without response IDs, identical requests and
+ * re-emissions can be indistinguishable. Ambiguous legacy events are deliberately dropped;
+ * this can undercount genuine requests, but avoids billing them twice.
  */
 export function parseCodexLine(line: string, state: CodexScanState): UsageRecord | null {
   let parsed: unknown;
@@ -139,6 +156,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   if (typeof parsed !== "object" || parsed === null) return null;
 
   const record = parsed as Record<string, unknown>;
+  if (record["type"] === "token_usage_record") state.sawUsageRecord = true;
   const payload = record["payload"];
   if (typeof payload !== "object" || payload === null) return null;
   const payloadRecord = payload as Record<string, unknown>;
@@ -184,7 +202,35 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
     return null;
   }
 
-  if (payloadType !== "token_count") return null;
+  if (record["type"] === "token_usage_record") {
+    const responseId = payloadRecord["response_id"];
+    const timestampMs = parseTimestampMs(record["timestamp"]);
+    const usage = readCodexTokenUsage(payloadRecord["usage"]);
+    if (
+      typeof responseId !== "string" ||
+      responseId.length === 0 ||
+      usage === null ||
+      usage.total_tokens !== usage.input_tokens + usage.output_tokens
+    ) {
+      state.malformedRecords += 1;
+      return null;
+    }
+    if (state.responseIds.has(responseId)) return null;
+    state.responseIds.add(responseId);
+    if (timestampMs === null || state.model.length === 0) return null;
+    if (state.suppressingForkCopies) {
+      if (timestampMs - state.forkCopyAnchorMs < FORK_COPY_MAX_GAP_MS) {
+        state.forkCopyAnchorMs = timestampMs;
+        return null;
+      }
+      state.suppressingForkCopies = false;
+    }
+    return codexUsageRecord(usage, timestampMs, state, responseId);
+  }
+
+  // Modern rollouts write the identified record before its anonymous token_count mirror.
+  // Even malformed identified records disable the fallback: billing must not overstate.
+  if (payloadType !== "token_count" || state.sawUsageRecord) return null;
 
   const info = payloadRecord["info"];
   if (typeof info !== "object" || info === null) return null;
@@ -302,6 +348,15 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   state.lastBilledUsageSignature = signature;
   state.lastBilledCumulativeUsage = state.lastCumulativeUsage;
 
+  return codexUsageRecord(last, timestampMs, state, null);
+}
+
+function codexUsageRecord(
+  last: CodexTokenUsage,
+  timestampMs: number,
+  state: CodexScanState,
+  dedupeKey: string | null,
+): UsageRecord | null {
   const inputTokens = last.input_tokens;
   const cachedInputTokens = last.cached_input_tokens;
   const cacheCreationTokens = last.cache_write_input_tokens;
@@ -333,7 +388,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
     state.turnId.length > 0
       ? { unresolvedServiceTierTurnId: state.turnId }
       : {}),
-    dedupeKey: null,
+    dedupeKey,
   };
 }
 
@@ -358,6 +413,8 @@ export const codexUsageFormat: TranscriptUsageFormat<CodexScanState> = {
       type: true,
       id: true,
       session_id: true,
+      response_id: true,
+      usage: true,
       model_provider: true,
       turn_id: true,
       model: true,
@@ -369,10 +426,18 @@ export const codexUsageFormat: TranscriptUsageFormat<CodexScanState> = {
   },
   // `turn_context`, `thread_settings_applied` and `session_meta` lines hold no
   // usage, but they carry the model, tier and session the reducer needs.
-  usageMarkers: ['"token_count"', '"turn_context"', '"thread_settings_applied"', '"session_meta"'],
+  usageMarkers: [
+    '"token_usage_record"',
+    '"token_count"',
+    '"turn_context"',
+    '"thread_settings_applied"',
+    '"session_meta"',
+  ],
   parseLine: (line, state) => orEmpty(parseCodexLine(line, state)),
   parseProjected: (projected, state) => orEmpty(parseCodexRecord(projected, state)),
   state: { initial: initialCodexScanState, schema: CodexScanState },
+  filterRecords: (records, state) =>
+    state.sawUsageRecord ? records.filter((record) => record.dedupeKey !== null) : records,
   readMalformedRecords: (state) => state.malformedRecords,
   // A rollout that moved after it was read leaves a copy in both places.
   sharedSessionsAcrossFiles: true,
