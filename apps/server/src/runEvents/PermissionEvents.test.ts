@@ -40,6 +40,7 @@ function stored(status = "pending", sequence = 1) {
         nodeId: "node",
         providerTurnId: null,
         nativeRequestRef: null,
+        providerSessionId: "session",
         kind: "command",
         status,
         responseCapability: { type: "live", providerSessionId: "session" },
@@ -60,6 +61,26 @@ it("correlates open and close events to the same exact action without publishing
   expect(opened?.expiresAt).toBe(DateTime.toEpochMillis(at) + 14_400_000);
   expect(opened?.t3Link).toBe("https://host.example.ts.net/project/thread");
   expect(JSON.stringify(opened)).not.toContain("sensitive action");
+});
+
+it("preserves native session identity and action digest when a callback becomes non-resumable", () => {
+  const opened = stored();
+  const closed = stored("cancelled", 2);
+  if (closed.event.type !== "runtime-request.updated") return;
+  const unavailable = {
+    ...closed,
+    event: {
+      ...closed.event,
+      payload: {
+        ...closed.event.payload,
+        responseCapability: { type: "not_resumable" as const, reason: "Provider stopped" },
+      },
+    },
+  };
+  const first = permissionPayload({ stored: opened, config, projectId: "project" });
+  const last = permissionPayload({ stored: unavailable, config, projectId: "project" });
+  expect(last?.sessionId).toBe(first?.sessionId);
+  expect(last?.actionDigest).toBe(first?.actionDigest);
 });
 
 it.effect.each([false, true])(

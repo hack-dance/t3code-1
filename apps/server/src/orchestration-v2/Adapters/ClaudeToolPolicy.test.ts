@@ -19,6 +19,8 @@ const policy = {
   disallowedTools: [
     "Edit",
     "Write",
+    "Read(*.env*)",
+    "Read(*/.ssh/*)",
     "Bash(git *--ext-diff*)",
     "Bash(git *--textconv*)",
     "Bash(git *--output*)",
@@ -39,6 +41,30 @@ describe("review tool permissions", () => {
     expect(result.allowDangerouslySkipPermissions).toBeUndefined();
   });
 
+  it("asks for known credential paths even when Read is listed", () => {
+    expect(
+      claudeToolPolicyAllows({
+        policy,
+        toolName: "Read",
+        toolInput: { file_path: "/project/src/app.ts" },
+      }),
+    ).toBe(true);
+    expect(
+      claudeToolPolicyAllows({
+        policy,
+        toolName: "Read",
+        toolInput: { file_path: "/project/.env.local" },
+      }),
+    ).toBe(false);
+    expect(
+      claudeToolPolicyAllows({
+        policy,
+        toolName: "Read",
+        toolInput: { file_path: "/home/operator/.ssh/id_ed25519" },
+      }),
+    ).toBe(false);
+  });
+
   it.each([
     "gh pr view 15 --json title",
     "gh pr diff 15",
@@ -54,6 +80,9 @@ describe("review tool permissions", () => {
   });
 
   it.each([
+    "gh api --paginate graphql",
+    "gh api --jq data graphql",
+    "git show --format '%GG' HEAD",
     "gh api -X POST repos/a/b/issues",
     "gh api --method=DELETE repos/a/b",
     "gh api -XGET repos/a/b",
