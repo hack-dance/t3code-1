@@ -2,6 +2,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
+  APPROVAL_REQUEST_TTL_MS,
   DEFAULT_SERVER_SETTINGS,
   ChatImageAttachment,
   CommandId,
@@ -10,15 +11,21 @@ import {
   OrchestratorMcpThreadReadResult,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderApprovalDecision,
+  ProviderRequestKind,
   RunId,
   RuntimeRequestId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2ThreadShell,
+  type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2TurnItem,
+  type OrchestrationV2ServerCommand,
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -32,6 +39,11 @@ import {
   OrchestratorProjectionError,
 } from "../../orchestration-v2/Orchestrator.ts";
 
+import {
+  describeMcpElicitation,
+  toMcpElicitationResponse,
+} from "../../provider/CodexMcpElicitation.ts";
+import { permissionResultFromDecision } from "../../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
 import * as ProviderAdapterRegistry from "../../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -72,6 +84,481 @@ const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
 );
+
+const pendingRequestHarness = (
+  modes: Parameters<typeof McpToolAccessTestkit.liveThreadShell>[1] = {},
+  providerInstanceId = ProviderInstanceId.make("codex"),
+) => {
+  const shell = {
+    ...McpToolAccessTestkit.liveThreadShell(threadId, modes),
+    providerInstanceId,
+    modelSelection: { instanceId: providerInstanceId, model: "test-model" },
+  };
+  const requests: Array<OrchestrationV2RuntimeRequest> = [];
+  const items: Array<OrchestrationV2TurnItem> = [];
+  const dispatched: Array<OrchestrationV2ServerCommand> = [];
+  for (const kind of [
+    ...ProviderRequestKind.literals,
+    "user_input",
+    "auth_refresh",
+    "dynamic_tool_call",
+  ] as const) {
+    const requestId = RuntimeRequestId.make(`request:${kind}`);
+    requests.push({
+      id: requestId,
+      nodeId: NodeId.make(`node:${kind}`),
+      providerTurnId: null,
+      nativeRequestRef: null,
+      kind,
+      status: "pending",
+      responseCapability: { type: "message" },
+      createdAt: shell.createdAt,
+      resolvedAt: null,
+    });
+    if (kind === "auth_refresh" || kind === "dynamic_tool_call") continue;
+    items.push({
+      id: TurnItemId.make(`item:${kind}`),
+      threadId,
+      runId: null,
+      nodeId: NodeId.make(`node:${kind}`),
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: items.length,
+      status: "waiting",
+      title: null,
+      startedAt: shell.createdAt,
+      completedAt: null,
+      updatedAt: shell.updatedAt,
+      ...(kind === "user_input"
+        ? { type: "user_input_request", requestId, questions: [] }
+        : {
+            type: "approval_request",
+            requestId,
+            requestKind: kind,
+            prompt:
+              "command: cat src/example.ts\ncwd: /workspace\npaths: src/example.ts\npermissions: read",
+            reason: "Read the requested file",
+            options: ProviderApprovalDecision.literals.map((decision) => ({
+              decision,
+              label: decision,
+            })),
+          }),
+    });
+  }
+  const dependencies = Layer.mock(ThreadManagement.ThreadManagementService)({
+    getThreadShell: (id) => Effect.succeed({ ...shell, id }),
+    getProjectThreadRecords: (target, _fields, query) =>
+      Effect.sync(() => ({
+        ...McpToolAccessTestkit.idleThreadProjection({ ...shell, id: target.threadId }),
+        runtimeRequests: requests,
+        turnItems: items.filter((item) => query?.turnItemTypes?.includes(item.type) ?? true),
+      })),
+    dispatch: (command) =>
+      Effect.sync(() => {
+        dispatched.push(command);
+        return { sequence: 1, storedEvents: [] };
+      }),
+  });
+  return {
+    requests,
+    items,
+    dispatched,
+    layer: layerThreadToolkit.pipe(
+      Layer.provideMerge(McpServer.McpServer.layer),
+      Layer.provide(NodeCrypto.layer),
+      Layer.provide(dependencies),
+    ),
+  };
+};
+
+const callPendingTool = (name: string, args: Record<string, unknown> = {}, invocation = scope) =>
+  McpServer.McpServer.pipe(
+    Effect.flatMap((server) => server.callTool({ name, arguments: args })),
+    Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+    Effect.provideService(McpSchema.McpServerClient, client),
+  );
+
+it.effect(
+  "lists only actionable pending request kinds and reads approval details without changing questions",
+  () => {
+    const harness = pendingRequestHarness();
+    return Effect.gen(function* () {
+      const list = yield* callPendingTool("t3_pending_request_list");
+      expect(list.structuredContent).toEqual({
+        requestIds: harness.requests
+          .filter(({ kind }) => kind !== "auth_refresh" && kind !== "dynamic_tool_call")
+          .map(({ id }) => id),
+        requests: harness.requests
+          .filter(({ kind }) => kind !== "auth_refresh" && kind !== "dynamic_tool_call")
+          .map(({ id, kind }) => ({ id, kind })),
+      });
+      for (const kind of ProviderRequestKind.literals) {
+        const read = yield* callPendingTool("t3_pending_request_read", {
+          requestId: `request:${kind}`,
+        });
+        expect(read.structuredContent).toEqual({
+          requestId: `request:${kind}`,
+          kind,
+          prompt:
+            "command: cat src/example.ts\ncwd: /workspace\npaths: src/example.ts\npermissions: read",
+          reason: "Read the requested file",
+          options: ProviderApprovalDecision.literals.map((decision) => ({
+            decision,
+            label: decision,
+          })),
+        });
+      }
+      const question = yield* callPendingTool("t3_pending_request_read", {
+        requestId: "request:user_input",
+      });
+      expect(question.structuredContent).toEqual({
+        requestId: "request:user_input",
+        questions: [],
+      });
+      harness.requests.splice(0, 1, { ...harness.requests[0]!, status: "resolved" });
+      const pending = harness.requests.filter(
+        ({ status, kind }) =>
+          status === "pending" && kind !== "auth_refresh" && kind !== "dynamic_tool_call",
+      );
+      const updated = yield* callPendingTool("t3_pending_request_list");
+      expect(updated.structuredContent).toEqual({
+        requestIds: pending.map(({ id }) => id),
+        requests: pending.map(({ id, kind }) => ({ id, kind })),
+      });
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect("maps approval decisions including acceptForSession to runtime-request.respond", () => {
+  const harness = pendingRequestHarness();
+  return Effect.gen(function* () {
+    for (const decision of ProviderApprovalDecision.literals) {
+      const result = yield* callPendingTool("t3_pending_request_respond", {
+        requestId: "request:permission",
+        decision,
+        expectRequestKind: "permission",
+      });
+      expect(result.isError).not.toBe(true);
+      expect(harness.dispatched.at(-1)).toMatchObject({
+        type: "runtime-request.respond",
+        threadId,
+        requestId: "request:permission",
+        decision,
+      });
+      expect(harness.dispatched.at(-1)).not.toHaveProperty("answers");
+    }
+    const result = yield* callPendingTool("t3_pending_request_respond", {
+      requestId: "request:user_input",
+      answers: { size: "large" },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(harness.dispatched.at(-1)).toMatchObject({ answers: { size: "large" } });
+    expect(harness.dispatched.at(-1)).not.toHaveProperty("decision");
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect(
+  "rejects acceptAlways for Claude approvals without options before consuming the request",
+  () => {
+    const harness = pendingRequestHarness({}, ProviderInstanceId.make("claude"));
+    const invocation = {
+      ...scope,
+      thread: { ...scope.thread!, providerInstanceId: ProviderInstanceId.make("claude") },
+    };
+    harness.items.splice(
+      0,
+      harness.items.length,
+      ...harness.items.map((item) => {
+        if (item.type !== "approval_request") return item;
+        const { options: _options, ...withoutOptions } = item;
+        return withoutOptions;
+      }),
+    );
+    return Effect.gen(function* () {
+      const result = yield* callPendingTool(
+        "t3_pending_request_respond",
+        { requestId: "request:permission", decision: "acceptAlways" },
+        invocation,
+      );
+      expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
+      expect(harness.dispatched).toEqual([]);
+      const pending = yield* callPendingTool("t3_pending_request_list", {}, invocation);
+      expect(pending.structuredContent).toMatchObject({
+        requestIds: expect.arrayContaining(["request:permission"]),
+      });
+      for (const decision of ["accept", "acceptForSession", "decline", "cancel"] as const) {
+        const response = yield* callPendingTool(
+          "t3_pending_request_respond",
+          { requestId: "request:permission", decision },
+          invocation,
+        );
+        expect(response.isError).not.toBe(true);
+        expect(harness.dispatched.at(-1)).toMatchObject({
+          type: "runtime-request.respond",
+          requestId: "request:permission",
+          decision,
+        });
+        expect(
+          permissionResultFromDecision({
+            toolName: "Read",
+            toolInput: { file_path: "/workspace/src/example.ts" },
+            toolUseID: "claude-tool-use",
+            decision,
+          }).behavior,
+        ).toBe(decision === "accept" || decision === "acceptForSession" ? "allow" : "deny");
+      }
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect("rejects unsupported elicitation grants without consuming the pending request", () => {
+  const harness = pendingRequestHarness();
+  const payload = {
+    mode: "form" as const,
+    message: "Approve?",
+    serverName: "test",
+    threadId: "native",
+    turnId: "turn",
+    requestedSchema: {
+      type: "object" as const,
+      properties: { approval: { type: "string" as const, enum: ["once", "always"] } },
+      required: ["approval"],
+    },
+  };
+  const index = harness.items.findIndex(
+    (item) => item.type === "approval_request" && item.requestKind === "permission",
+  );
+  const item = harness.items[index]!;
+  harness.items[index] = { ...item, ...describeMcpElicitation(payload) };
+  return Effect.gen(function* () {
+    expect(toMcpElicitationResponse(payload, "acceptForSession").action).toBe("decline");
+    const result = yield* callPendingTool("t3_pending_request_respond", {
+      requestId: "request:permission",
+      decision: "acceptForSession",
+    });
+    expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
+    expect(harness.dispatched).toEqual([]);
+    expect(harness.requests.find(({ kind }) => kind === "permission")?.status).toBe("pending");
+    for (const decision of ["accept", "acceptAlways"] as const) {
+      const accepted = yield* callPendingTool("t3_pending_request_respond", {
+        requestId: "request:permission",
+        decision,
+      });
+      expect(accepted.isError).not.toBe(true);
+      expect(toMcpElicitationResponse(payload, decision).action).toBe("accept");
+    }
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("rejects stale requests and mismatched response kinds before dispatch", () => {
+  const harness = pendingRequestHarness();
+  return Effect.gen(function* () {
+    for (const args of [
+      { requestId: "missing", decision: "accept" },
+      { requestId: "request:user_input", decision: "accept", answers: {} },
+      { requestId: "request:permission", decision: "accept", answers: {} },
+      { requestId: "request:permission", answers: {} },
+      { requestId: "request:permission", decision: "accept", expectRequestKind: "command" },
+      { requestId: "request:permission" },
+      { requestId: "request:user_input" },
+      { requestId: "request:auth_refresh", decision: "accept" },
+    ]) {
+      const result = yield* callPendingTool("t3_pending_request_respond", args);
+      expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
+    }
+    const request = harness.requests.find(({ kind }) => kind === "permission")!;
+    for (const status of ["resolved", "expired", "cancelled"] as const) {
+      harness.requests.splice(harness.requests.indexOf(request), 1);
+      harness.requests.push({ ...request, status });
+      const result = yield* callPendingTool("t3_pending_request_respond", {
+        requestId: request.id,
+        decision: "accept",
+      });
+      expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
+      harness.requests.pop();
+      harness.requests.push(request);
+    }
+    harness.requests.splice(harness.requests.indexOf(request), 1, {
+      ...request,
+      responseCapability: { type: "not_resumable", reason: "The run was interrupted." },
+    });
+    const stale = yield* callPendingTool("t3_pending_request_respond", {
+      requestId: request.id,
+      decision: "accept",
+    });
+    expect(declaredFailure(stale)).toMatchObject({ code: "invalid_request" });
+    expect(harness.dispatched).toEqual([]);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("does not accept decision aliases outside ProviderApprovalDecision", () => {
+  const harness = pendingRequestHarness();
+  return Effect.gen(function* () {
+    for (const decision of ["accept-for-session", "approve", "unknown"]) {
+      const error = yield* callPendingTool("t3_pending_request_respond", {
+        requestId: "request:permission",
+        decision,
+      }).pipe(Effect.flip);
+      expect(error._tag).toBe("InvalidParams");
+    }
+    expect(harness.dispatched).toEqual([]);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("does not answer expired, resolved, or cancelled questions", () => {
+  const harness = pendingRequestHarness();
+  const index = harness.requests.findIndex(({ kind }) => kind === "user_input");
+  const request = harness.requests[index]!;
+  return Effect.gen(function* () {
+    for (const status of ["expired", "resolved", "cancelled"] as const) {
+      harness.requests[index] = { ...request, status };
+      const result = yield* callPendingTool("t3_pending_request_respond", {
+        requestId: request.id,
+        answers: { size: "large" },
+      });
+      expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
+    }
+    expect(harness.dispatched).toEqual([]);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("keeps approval responses behind orchestration and write access", () => {
+  const harness = pendingRequestHarness();
+  return Effect.gen(function* () {
+    for (const invocation of [
+      { ...scope, capabilities: new Set<never>() },
+      {
+        ...scope,
+        thread: undefined,
+        client: { sessionId: "read-only", label: "reader", access: "read-only" as const },
+      },
+    ]) {
+      const result = yield* callPendingTool(
+        "t3_pending_request_respond",
+        {
+          threadId,
+          requestId: "request:permission",
+          decision: "accept",
+        },
+        invocation,
+      );
+      expect(declaredFailure(result)).toMatchObject({ code: "capability_denied" });
+    }
+    expect(harness.dispatched).toEqual([]);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect.each([
+  { runtimeMode: "approval-required", interactionMode: "default" },
+  { runtimeMode: "auto-accept-edits", interactionMode: "default" },
+  { runtimeMode: "auto", interactionMode: "default" },
+  { runtimeMode: "full-access", interactionMode: "plan" },
+] as const)(
+  "refuses grants from $runtimeMode/$interactionMode callers but preserves questions and declines",
+  (modes) => {
+    const harness = pendingRequestHarness(modes);
+    return Effect.gen(function* () {
+      for (const target of [undefined, ThreadId.make("same-mode-target")]) {
+        for (const decision of ["accept", "acceptForSession", "acceptAlways"] as const) {
+          const result = yield* callPendingTool("t3_pending_request_respond", {
+            ...(target === undefined ? {} : { threadId: target }),
+            requestId: "request:permission",
+            decision,
+          });
+          expect(declaredFailure(result)).toMatchObject({ code: "capability_denied" });
+        }
+      }
+      expect(harness.dispatched).toEqual([]);
+      for (const response of [
+        { requestId: "request:user_input", answers: { size: "large" } },
+        { requestId: "request:permission", decision: "decline" },
+        { requestId: "request:permission", decision: "cancel" },
+      ]) {
+        const result = yield* callPendingTool("t3_pending_request_respond", response);
+        expect(result.isError).not.toBe(true);
+        expect(harness.dispatched.at(-1)).toMatchObject(response);
+      }
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect("requires full-access client authority to grant approvals", () => {
+  const harness = pendingRequestHarness({ runtimeMode: "approval-required" });
+  return Effect.gen(function* () {
+    for (const access of ["auto", "full-access"] as const) {
+      const result = yield* callPendingTool(
+        "t3_pending_request_respond",
+        { threadId, requestId: "request:permission", decision: "accept" },
+        {
+          ...scope,
+          thread: undefined,
+          client: { sessionId: "client", label: "client", access },
+        },
+      );
+      if (access === "auto") {
+        expect(declaredFailure(result)).toMatchObject({ code: "capability_denied" });
+        expect(harness.dispatched).toEqual([]);
+      } else {
+        expect(result.isError).not.toBe(true);
+        expect(harness.dispatched).toHaveLength(1);
+      }
+    }
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("keeps overdue approvals discoverable and rejectable while refusing grants", () => {
+  const harness = pendingRequestHarness();
+  return Effect.gen(function* () {
+    yield* TestClock.setTime(DateTime.toEpochMillis(harness.requests[0]!.createdAt));
+    yield* TestClock.adjust(APPROVAL_REQUEST_TTL_MS - 1);
+    const before = yield* callPendingTool("t3_pending_request_respond", {
+      requestId: "request:permission",
+      decision: "accept",
+    });
+    expect(before.isError).not.toBe(true);
+    expect(harness.dispatched).toHaveLength(1);
+    yield* TestClock.adjust(1);
+    for (const kind of ProviderRequestKind.literals) {
+      const read = yield* callPendingTool("t3_pending_request_read", {
+        requestId: `request:${kind}`,
+      });
+      expect(read.isError).not.toBe(true);
+      for (const decision of ["accept", "acceptForSession", "acceptAlways"] as const) {
+        const result = yield* callPendingTool("t3_pending_request_respond", {
+          requestId: `request:${kind}`,
+          decision,
+        });
+        expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
+      }
+    }
+    expect(harness.dispatched).toHaveLength(1);
+    const list = yield* callPendingTool("t3_pending_request_list");
+    expect(list.structuredContent).toEqual({
+      requestIds: harness.requests
+        .filter(({ kind }) => kind !== "auth_refresh" && kind !== "dynamic_tool_call")
+        .map(({ id }) => id),
+      requests: harness.requests
+        .filter(({ kind }) => kind !== "auth_refresh" && kind !== "dynamic_tool_call")
+        .map(({ id, kind }) => ({ id, kind })),
+    });
+    const answer = yield* callPendingTool("t3_pending_request_respond", {
+      requestId: "request:user_input",
+      answers: { size: "large" },
+    });
+    expect(answer.isError).not.toBe(true);
+    expect(harness.dispatched).toHaveLength(2);
+    for (const kind of ProviderRequestKind.literals) {
+      for (const decision of ["decline", "cancel"] as const) {
+        const response = { requestId: `request:${kind}`, decision };
+        const result = yield* callPendingTool("t3_pending_request_respond", response);
+        expect(result.isError).not.toBe(true);
+        expect(harness.dispatched.at(-1)).toMatchObject(response);
+      }
+    }
+  }).pipe(Effect.provide(harness.layer));
+});
 
 const threadId = ThreadId.make("mcp-core-thread");
 const scope: McpInvocationContext.McpInvocationScope = {
@@ -148,7 +635,7 @@ it.effect("an answered question reports already answered instead of not found", 
     });
     expect(declaredFailure(yield* respond("missing-question"))).toMatchObject({
       code: "invalid_request",
-      message: "The pending user-input request was not found.",
+      message: "The pending runtime request was not found.",
     });
   }).pipe(
     Effect.provide(

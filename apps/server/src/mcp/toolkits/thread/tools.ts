@@ -11,6 +11,11 @@ import {
   ProviderInteractionMode,
   RuntimeRequestId,
   ProviderUserInputAnswers,
+  ProviderApprovalDecision,
+  ProviderApprovalFullAccessOverride,
+  ProviderApprovalOption,
+  ProviderRequestKind,
+  OrchestrationV2RuntimeRequest,
   IsoDateTime,
   OrchestratorMcpFailure,
   OrchestrationV2DispatchCommandResult,
@@ -144,23 +149,42 @@ const question = Schema.Struct({
   initialAnswer: Schema.optional(Schema.String),
   required: Schema.optional(Schema.Boolean),
 });
-const pendingRequest = Schema.Struct({
-  requestId: RuntimeRequestId,
-  questions: Schema.Array(question),
-});
+const pendingRequest = Schema.Union([
+  Schema.Struct({
+    requestId: RuntimeRequestId,
+    questions: Schema.Array(question),
+  }),
+  Schema.Struct({
+    requestId: RuntimeRequestId,
+    kind: ProviderRequestKind,
+    prompt: Schema.optional(Schema.String),
+    reason: Schema.optional(Schema.String),
+    fullAccessOverride: Schema.optional(ProviderApprovalFullAccessOverride),
+    appName: Schema.optional(Schema.String),
+    options: Schema.optional(Schema.Array(ProviderApprovalOption)),
+  }),
+]);
 const PendingRequestListTool = Tool.make("t3_pending_request_list", {
   ...commandTool,
   description:
-    "List pending user questions in a thread. Omit threadId for this thread. Approval requests are not included.",
+    "List pending runtime requests of all kinds in a thread, with each id and kind. requestIds is retained for compatibility. Omit threadId for this thread.",
   parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
-  success: Schema.Struct({ requestIds: Schema.Array(RuntimeRequestId) }),
+  success: Schema.Struct({
+    requestIds: Schema.Array(RuntimeRequestId),
+    requests: Schema.Array(
+      Schema.Struct({
+        id: RuntimeRequestId,
+        kind: OrchestrationV2RuntimeRequest.fields.kind,
+      }),
+    ),
+  }),
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
 const PendingRequestReadTool = Tool.make("t3_pending_request_read", {
   ...commandTool,
   description:
-    "Read a pending user question. Answer with t3_pending_request_respond; existing live or message response handling is used.",
+    "Read pending user questions or an approval's kind and stored details. Approval prompt and reason preserve provider-supplied target details verbatim, including commands, paths, cwd, or requested permissions when recorded; missing details are not inferred. Respond with t3_pending_request_respond.",
   parameters: Schema.Struct(requestTarget),
   success: pendingRequest,
 })
@@ -169,8 +193,13 @@ const PendingRequestReadTool = Tool.make("t3_pending_request_read", {
 const PendingRequestRespondTool = Tool.make("t3_pending_request_respond", {
   ...commandTool,
   description:
-    "Answer a pending user-input request using the existing runtime response command. This cannot approve a permission request.",
-  parameters: Schema.Struct({ ...requestTarget, answers: ProviderUserInputAnswers }),
+    "Respond to a pending runtime request using the existing runtime response command. Send answers only for user_input, or decision only for approvals: accept, acceptForSession, acceptAlways, decline, cancel. Grants must match the request's options when provided; acceptAlways requires an explicit option. Granting approvals requires a live full-access/default calling thread or a full-access client. Read the request before approving it. Optional expectRequestKind guards against a kind mismatch. Unknown, non-pending, and non-resumable requests are rejected. Approvals at least four hours old can only be declined or cancelled.",
+  parameters: Schema.Struct({
+    ...requestTarget,
+    answers: Schema.optional(ProviderUserInputAnswers),
+    decision: Schema.optional(ProviderApprovalDecision),
+    expectRequestKind: Schema.optional(OrchestrationV2RuntimeRequest.fields.kind),
+  }),
 })
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);

@@ -1,5 +1,6 @@
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import * as SchemaAST from "effect/SchemaAST";
 import * as SchemaGetter from "effect/SchemaGetter";
@@ -1030,6 +1031,20 @@ export const OrchestrationV2RuntimeRequest = Schema.Struct({
   answers: Schema.optional(ProviderUserInputAnswers),
 });
 export type OrchestrationV2RuntimeRequest = typeof OrchestrationV2RuntimeRequest.Type;
+
+export const APPROVAL_REQUEST_TTL_MS = 4 * 60 * 60 * 1000;
+
+export function approvalRequestExpiresAt(
+  request: Pick<OrchestrationV2RuntimeRequest, "kind" | "createdAt">,
+): number | null {
+  if (
+    request.kind === "user_input" ||
+    request.kind === "auth_refresh" ||
+    request.kind === "dynamic_tool_call"
+  )
+    return null;
+  return DateTime.toEpochMillis(request.createdAt) + APPROVAL_REQUEST_TTL_MS;
+}
 
 const SubagentNotificationSource = Schema.Struct({
   kind: Schema.Literal("subagent"),

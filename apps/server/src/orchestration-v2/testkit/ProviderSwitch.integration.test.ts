@@ -18,6 +18,9 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
+  RuntimeRequestId,
+  NodeId,
+  type ProviderApprovalDecision,
   ThreadId,
   TurnItemId,
   ProviderDriverKind,
@@ -31,6 +34,8 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../../persistence/Sqlite.ts";
@@ -116,6 +121,10 @@ function makeTestAdapter(input: {
   readonly holdRunOrdinal?: number;
   readonly holdFirstTurn?: Deferred.Deferred<void>;
   readonly releaseFirstTurn?: Deferred.Deferred<void>;
+  readonly pendingApproval?: {
+    readonly requestId: RuntimeRequestId;
+    readonly response: Deferred.Deferred<ProviderApprovalDecision | undefined>;
+  };
 }): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {
     instanceId: input.instanceId,
@@ -124,6 +133,7 @@ function makeTestAdapter(input: {
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
     openSession: (sessionInput) =>
       Effect.gen(function* () {
+        const sessionScope = yield* Scope.Scope;
         const events = yield* PubSub.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const now = yield* DateTime.now;
         const providerSession: OrchestrationV2ProviderSession = {
@@ -216,8 +226,8 @@ function makeTestAdapter(input: {
                   ),
               }),
           compactThread: (turnInput) => runtime.startTurn(turnInput),
-          startTurn: (turnInput) =>
-            Effect.gen(function* () {
+          startTurn: (turnInput) => {
+            const turn = Effect.gen(function* () {
               if (
                 input.failStartOnce !== undefined &&
                 (yield* Ref.getAndSet(input.failStartOnce, false))
@@ -264,6 +274,43 @@ function makeTestAdapter(input: {
               const providerTurnId = ProviderTurnId.make(
                 `provider-turn:${input.driver}:${turnInput.threadId}:${turnInput.runOrdinal}`,
               );
+              if (input.pendingApproval !== undefined) {
+                yield* PubSub.publish(events, {
+                  type: "provider_turn.updated",
+                  driver: input.driver,
+                  providerTurn: {
+                    id: providerTurnId,
+                    providerThreadId: turnInput.providerThread.id,
+                    nodeId: turnInput.rootNodeId,
+                    runAttemptId: turnInput.attemptId,
+                    nativeTurnRef: null,
+                    ordinal: turnInput.runOrdinal,
+                    status: "running",
+                    startedAt: eventTime,
+                    completedAt: null,
+                  },
+                });
+                yield* PubSub.publish(events, {
+                  type: "runtime_request.updated",
+                  driver: input.driver,
+                  threadId: turnInput.threadId,
+                  runtimeRequest: {
+                    id: input.pendingApproval.requestId,
+                    nodeId: NodeId.make(`approval:${turnInput.runId}`),
+                    providerTurnId,
+                    nativeRequestRef: null,
+                    kind: "command",
+                    status: "pending",
+                    responseCapability: {
+                      type: "live",
+                      providerSessionId: sessionInput.providerSessionId,
+                    },
+                    createdAt: eventTime,
+                    resolvedAt: null,
+                  },
+                });
+                yield* Deferred.await(input.pendingApproval.response);
+              }
               const terminalStatus = input.failedRunOrdinals?.has(turnInput.runOrdinal)
                 ? "failed"
                 : input.interruptedRunOrdinals?.has(turnInput.runOrdinal)
@@ -359,10 +406,20 @@ function makeTestAdapter(input: {
               for (const event of providerEvents) {
                 yield* PubSub.publish(events, event);
               }
-            }),
+            });
+            // A live provider acknowledges startup before waiting for its approval response.
+            return input.pendingApproval === undefined
+              ? turn
+              : turn.pipe(Effect.forkIn(sessionScope), Effect.asVoid);
+          },
           steerTurn: () => Effect.void,
           interruptTurn: () => Effect.void,
-          respondToRuntimeRequest: () => Effect.void,
+          respondToRuntimeRequest: (response) =>
+            input.pendingApproval === undefined
+              ? Effect.void
+              : Deferred.succeed(input.pendingApproval.response, response.decision).pipe(
+                  Effect.asVoid,
+                ),
           readThreadSnapshot: () =>
             unimplemented(input.driver, "readThreadSnapshot unused in provider switch test"),
           rollbackThread: () =>
@@ -405,6 +462,85 @@ const waitForIdle = Effect.fn("ProviderSwitchTest.waitForIdle")(function* (
 });
 
 describe("orchestration v2 provider switching", () => {
+  it.effect.each(["decline", "cancel"] as const)(
+    "unblocks an active provider with %s after the approval deadline",
+    (decision) =>
+      Effect.gen(function* () {
+        const response = yield* Deferred.make<ProviderApprovalDecision | undefined>();
+        const requestId = RuntimeRequestId.make("overdue-approval");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const registry = ProviderAdapterRegistry.layerFromAdapters([
+          makeTestAdapter({
+            instanceId: CODEX_MODEL_SELECTION.instanceId,
+            driver: CODEX_DRIVER,
+            capabilities: CodexProviderCapabilitiesV2,
+            modelSelection: CODEX_MODEL_SELECTION,
+            responseByRunOrdinal: {},
+            capturedTurns,
+            pendingApproval: { requestId, response },
+          }),
+        ]);
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("overdue-create"),
+            threadId,
+            projectId,
+            createdBy: "user",
+            creationSource: "web",
+            title: "Overdue approval",
+            modelSelection: CODEX_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("overdue-start"),
+            threadId,
+            messageId: MessageId.make("overdue-message"),
+            createdBy: "user",
+            creationSource: "web",
+            text: "Wait for approval",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+          });
+          yield* orchestrator.streamStoredEvents.pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "runtime-request.updated" && event.payload.id === requestId,
+            ),
+            Stream.runHead,
+          );
+          yield* TestClock.adjust("4 hours");
+          const waiting = yield* orchestrator.getThreadProjection(threadId);
+          assert.equal(waiting.runs[0]?.status, "running");
+          assert.equal(waiting.runtimeRequests[0]?.status, "pending");
+          assert.isFalse(yield* Deferred.isDone(response));
+          yield* orchestrator.dispatch({
+            type: "runtime-request.respond",
+            commandId: CommandId.make("overdue-reject"),
+            threadId,
+            requestId,
+            decision,
+          });
+          assert.equal(yield* Deferred.await(response), decision);
+          const settled = yield* waitForIdle(threadId);
+          yield* worker.drain();
+          assert.equal(settled.runtimeRequests[0]?.status, "resolved");
+          assert.equal(settled.runtimeRequests[0]?.decision, decision);
+          assert.equal(settled.runs[0]?.status, "completed");
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry({ name: `overdue-${decision}` }, registry),
+          ),
+        );
+      }),
+  );
+
   it.live.each([
     "compact-native",
     "compact-legacy",

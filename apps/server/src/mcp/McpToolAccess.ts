@@ -145,7 +145,16 @@ export const writesThreads = <P, A, E, R>(
       // refusal here, since handlers wrap dispatch errors their own way.
       const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
       return yield* handle(params).pipe(
-        Effect.provideService(DispatchModeLimit, { ...caller.limits, refused }),
+        Effect.provideService(DispatchModeLimit, {
+          ...caller.limits,
+          ...(caller.scope.thread === undefined
+            ? {}
+            : {
+                callerThreadId: caller.scope.thread.threadId,
+                callerProviderInstanceId: caller.scope.thread.providerInstanceId,
+              }),
+          refused,
+        }),
         Effect.catch((error) =>
           Effect.flatMap(Ref.get(refused), (refusal) =>
             Effect.fail<E | OrchestratorMcpFailure>(
