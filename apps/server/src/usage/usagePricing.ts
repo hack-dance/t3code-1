@@ -216,10 +216,18 @@ export function lookupRate(table: RateTable, model: string): ModelRate | null {
 }
 
 function resolveRate(table: RateTable, model: string): ModelRate | null {
-  const key = stripVariantSuffix(normalizeRateKey(model));
+  let key = stripVariantSuffix(normalizeRateKey(model));
   const bareName = bareModelName(key);
   if (bareName.length === 0 || UNPRICEABLE_MODELS.has(bareName)) return null;
-  return table.get(key) ?? null;
+  // Account labels can precede provider-qualified names. Prefer the most specific
+  // published key; the table only creates bare aliases when their rates agree.
+  for (;;) {
+    const rate = table.get(key);
+    if (rate !== undefined) return rate;
+    const slash = key.indexOf("/");
+    if (slash === -1) return null;
+    key = key.slice(slash + 1);
+  }
 }
 
 export type PricedRecord = Pick<

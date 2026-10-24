@@ -209,7 +209,9 @@ describe("usage pricing", () => {
       expect(lookupRate(table, "deepinfra/anthropic/claude-fable-5")?.cacheReadCostPerToken).toBe(
         1e-5,
       );
-      expect(lookupRate(table, "other/claude-fable-5")).toBeNull();
+      expect(lookupRate(table, "other/claude-fable-5")).toEqual(
+        lookupRate(table, "claude-fable-5"),
+      );
     }
   });
 
@@ -219,7 +221,26 @@ describe("usage pricing", () => {
     expect(lookupRate(table, "claude-fable-5-1[1m]")).toEqual(
       lookupRate(table, "claude-fable-5-1"),
     );
-    expect(lookupRate(table, "anthropic/Claude-Fable-5-1[1m]")).toBeNull();
+    expect(lookupRate(table, "anthropic/Claude-Fable-5-1[1m]")).toEqual(
+      lookupRate(table, "claude-fable-5-1"),
+    );
+  });
+
+  it("resolves account prefixes without inventing rates", () => {
+    const table = parseRateTable({
+      "gpt-6-sol": rate(2),
+      "xai/grok-example": rate(3),
+      "other/grok-example": rate(4),
+    });
+    for (const prefix of ["personal", "hd", "dio", "openai"]) {
+      expect(lookupRate(table, ` ${prefix}/GPT-6-SOL `)).toEqual(lookupRate(table, "gpt-6-sol"));
+      expect(lookupRate(table, `${prefix}/gpt-6-astra`)).toBeNull();
+    }
+    expect(lookupRate(table, "personal/xai/grok-example")).toEqual(
+      lookupRate(table, "xai/grok-example"),
+    );
+    expect(lookupRate(table, "personal/grok-example")).toBeNull();
+    expect(lookupRate(table, "gpt-6-astra")).toBeNull();
   });
 
   it("adds a bare alias when every qualified entry has the same rate", () => {
