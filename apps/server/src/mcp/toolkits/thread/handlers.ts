@@ -1,4 +1,6 @@
 import {
+  approvalRequestExpiresAt,
+  ProviderRequestKind,
   type CommandId,
   type RuntimeRequestId,
   ThreadId,
@@ -8,10 +10,12 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
+  assertFullAccess,
   dispatchFailure,
   newCommandId,
   readCaller,
@@ -49,29 +53,39 @@ const dispatch = Effect.fn("mcp.dispatchThreadCommand")(function* (
   return { sequence: result.sequence };
 });
 
-const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
+const readPendingRequest = Effect.fn("mcp.readQuestion")(function* (input: {
   threadId?: ThreadId | undefined;
   requestId: RuntimeRequestId;
 }) {
   const context = yield* readThread(input.threadId, ["runtimeRequests", "turnItems"]);
   const request = context.projection.runtimeRequests.find(
-    (request) => request.id === input.requestId && request.kind === "user_input",
+    (request) => request.id === input.requestId,
   );
-  const item = context.projection.turnItems.find(
-    (item) => item.type === "user_input_request" && item.requestId === input.requestId,
-  );
-  if (request === undefined || item?.type !== "user_input_request")
+  if (request === undefined)
     return yield* new OrchestratorMcpFailure({
       code: "invalid_request",
-      message: "The pending user-input request was not found.",
+      message: "The pending runtime request was not found.",
     });
   if (request.status !== "pending")
     return yield* new OrchestratorMcpFailure({
       code: "invalid_request",
       message:
-        request.status === "resolved"
+        request.kind === "user_input" && request.status === "resolved"
           ? "The user-input request was already answered."
-          : `The user-input request is no longer pending (${request.status}).`,
+          : `The runtime request is no longer pending (${request.status}).`,
+    });
+  const item = context.projection.turnItems.find(
+    (item) =>
+      (item.type === "user_input_request" || item.type === "approval_request") &&
+      item.requestId === request.id,
+  );
+  if (
+    (item?.type !== "user_input_request" || request.kind !== "user_input") &&
+    (item?.type !== "approval_request" || request.kind !== item.requestKind)
+  )
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message: "The runtime request has no matching question or approval details.",
     });
   return { ...context, request, item };
 });
@@ -205,29 +219,105 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   t3_pending_request_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const { projection } = yield* readThread(input.threadId, ["runtimeRequests"]);
+      const requests = projection.runtimeRequests
+        .filter(
+          (request) =>
+            request.status === "pending" &&
+            (request.kind === "user_input" ||
+              ProviderRequestKind.literals.some((kind) => kind === request.kind)),
+        )
+        .map(({ id, kind }) => ({ id, kind }));
       return {
-        requestIds: projection.runtimeRequests
-          .filter((request) => request.kind === "user_input" && request.status === "pending")
-          .map((request) => request.id),
+        requestIds: requests.map(({ id }) => id),
+        requests,
       };
     }),
   ),
   t3_pending_request_read: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
-      const { item } = yield* readQuestion(input);
-      return { requestId: input.requestId, questions: item.questions };
+      const { item } = yield* readPendingRequest(input);
+      if (item.type === "user_input_request")
+        return { requestId: input.requestId, questions: item.questions };
+      return {
+        requestId: input.requestId,
+        kind: item.requestKind,
+        ...(item.prompt === undefined ? {} : { prompt: item.prompt }),
+        ...(item.reason === undefined ? {} : { reason: item.reason }),
+        ...(item.fullAccessOverride === undefined
+          ? {}
+          : { fullAccessOverride: item.fullAccessOverride }),
+        ...(item.appName === undefined ? {} : { appName: item.appName }),
+        ...(item.options === undefined ? {} : { options: item.options }),
+      };
     }),
   ),
   t3_pending_request_respond: writesThread((input) =>
     Effect.gen(function* () {
-      const { threads, projection } = yield* readQuestion(input);
+      const context = yield* readPendingRequest(input);
+      const { threads, projection, request } = context;
+      const expiresAt = approvalRequestExpiresAt(request);
+      if (
+        expiresAt !== null &&
+        DateTime.toEpochMillis(yield* DateTime.now) >= expiresAt &&
+        input.decision !== "decline" &&
+        input.decision !== "cancel"
+      )
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message:
+            "This approval expired after 4 hours. Decline or cancel it, then request a new approval in the thread.",
+        });
+      if (input.expectRequestKind !== undefined && input.expectRequestKind !== request.kind)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: `Expected request kind ${input.expectRequestKind}, but found ${request.kind}.`,
+        });
+      if (request.responseCapability.type === "not_resumable")
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The runtime request is stale and can no longer be resumed.",
+        });
+      if (request.kind === "user_input") {
+        if (input.decision !== undefined || input.answers === undefined)
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "User-input requests require answers and do not accept a decision.",
+          });
+      } else if (input.answers !== undefined || input.decision === undefined) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "Approval requests require a decision and do not accept answers.",
+        });
+      }
+      if (
+        input.decision === "accept" ||
+        input.decision === "acceptForSession" ||
+        input.decision === "acceptAlways"
+      ) {
+        if (
+          context.item.type === "approval_request" &&
+          (context.item.options === undefined
+            ? input.decision === "acceptAlways"
+            : !context.item.options.some((option) => option.decision === input.decision))
+        ) {
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "This approval does not support the requested decision.",
+          });
+        }
+        yield* assertFullAccess(
+          context,
+          "Granting approvals needs a live full-access/default calling thread or a full-access client.",
+        );
+      }
       const result = yield* threads
         .dispatch({
           type: "runtime-request.respond",
           threadId: projection.thread.id,
           commandId: yield* newCommandId(),
           requestId: input.requestId,
-          answers: input.answers,
+          ...(input.answers === undefined ? {} : { answers: input.answers }),
+          ...(input.decision === undefined ? {} : { decision: input.decision }),
         })
         .pipe(Effect.mapError(dispatchFailure));
       return { sequence: result.sequence };

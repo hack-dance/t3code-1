@@ -1,3 +1,4 @@
+import { isLiveCallerShell } from "../orchestration-v2/DispatchModeLimit.ts";
 import type { ProjectionRecordField } from "../orchestration-v2/ProjectionStore.ts";
 import {
   CommandId,
@@ -110,7 +111,7 @@ export const assertTargetWithinLimits = (
  */
 export function assertLiveCaller({ caller, scope }: Caller) {
   if (caller === undefined) return Effect.void;
-  return OrchestrationMcp.isLiveCallerShell(caller, scope.thread?.providerInstanceId)
+  return isLiveCallerShell(caller, scope.thread?.providerInstanceId)
     ? Effect.void
     : Effect.fail(
         new OrchestratorMcpFailure({
@@ -164,7 +165,7 @@ export const readThread = Effect.fn("mcp.readThread")(function* <
   }
   const projection = yield* context.threads
     .getProjectThreadRecords({ projectId: shell.projectId, threadId: targetId }, fields, {
-      turnItemTypes: ["user_input_request"],
+      turnItemTypes: ["user_input_request", "approval_request"],
     })
     .pipe(
       Effect.mapError((error) =>

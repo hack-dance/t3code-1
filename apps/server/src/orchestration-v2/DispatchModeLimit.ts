@@ -1,4 +1,10 @@
-import type { ProviderInteractionMode, RuntimeMode, ThreadId } from "@t3tools/contracts";
+import type {
+  OrchestrationV2ThreadShell,
+  ProviderInstanceId,
+  ProviderInteractionMode,
+  RuntimeMode,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Ref from "effect/Ref";
 
@@ -18,6 +24,8 @@ export interface DispatchModeRefusal extends DispatchModes {
  * else can change them.
  */
 export interface DispatchModeLimitValue extends DispatchModes {
+  readonly callerThreadId?: ThreadId;
+  readonly callerProviderInstanceId?: ProviderInstanceId;
   readonly refused?: Ref.Ref<DispatchModeRefusal | undefined>;
 }
 
@@ -43,3 +51,27 @@ export const exceededDispatchModeLimit = (
     : interactionModeRank[modes.interactionMode] > interactionModeRank[limit.interactionMode]
       ? "interaction"
       : undefined;
+
+/**
+ * A caller's thread is live while it is not archived, runs on the caller's
+ * provider instance, and has an active run or a background subagent that
+ * instance started. A background subagent outlives its run and calls tools
+ * with its thread's credential, which is revoked when the provider process
+ * goes away.
+ */
+export const isLiveCallerShell = (
+  shell: Pick<
+    OrchestrationV2ThreadShell,
+    "deletedAt" | "archivedAt" | "activeRunId" | "providerInstanceId" | "pendingBackgroundTasks"
+  > | null,
+  providerInstanceId: ProviderInstanceId | undefined,
+) =>
+  shell !== null &&
+  shell.deletedAt === null &&
+  shell.archivedAt === null &&
+  shell.providerInstanceId === providerInstanceId &&
+  (shell.activeRunId !== null ||
+    (shell.pendingBackgroundTasks?.some(
+      (task) => task.kind === "subagent" && task.providerInstanceId === providerInstanceId,
+    ) ??
+      false));

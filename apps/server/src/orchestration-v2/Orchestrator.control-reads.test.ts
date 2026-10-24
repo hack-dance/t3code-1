@@ -1,6 +1,18 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import { McpSchema, McpServer } from "effect/ai";
+import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as ThreadManagement from "./ThreadManagementService.ts";
+import * as ThreadSearch from "./ThreadSearch.ts";
+import * as ScheduledTasks from "../scheduledTasks/ScheduledTaskService.ts";
+import {
+  describeMcpElicitation,
+  toMcpElicitationResponse,
+} from "../provider/CodexMcpElicitation.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   MessageId,
   EventId,
   NodeId,
@@ -9,6 +21,8 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderApprovalDecision,
+  ProviderRequestKind,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -18,6 +32,10 @@ import {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import { DispatchModeLimit } from "./DispatchModeLimit.ts";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -47,7 +65,6 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -63,6 +80,7 @@ const adapter = {
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 const layerDatabase = SqlitePersistence.layerMemory;
 const layerTest = Layer.mergeAll(
+  ThreadCommandExecutor.layer,
   layerDatabase,
   ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
   EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
@@ -71,6 +89,580 @@ const layerTest = Layer.mergeAll(
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
     { databaseLayer: layerDatabase, runEffectWorker: false },
   ),
+);
+
+it.effect.each([false, true])(
+  "MCP grants preserve Codex elicitation choices (session offered: %s)",
+  (sessionOffered) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threadId = ThreadId.make("elicitation");
+      const sessionId = ProviderSessionId.make("elicitation-session");
+      const now = yield* DateTime.now;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create"),
+        threadId,
+        projectId: ProjectId.make("project"),
+        title: "Elicitation",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* projections.apply({
+        id: EventId.make("attach"),
+        type: "provider-session.attached",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: sessionId,
+          driver: adapter.driver,
+          providerInstanceId: instanceId,
+          status: "ready",
+          cwd: "/repo",
+          model: modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        },
+      });
+      const payload = {
+        mode: "form" as const,
+        message: "Approve?",
+        serverName: "test",
+        threadId: "native",
+        turnId: "turn",
+        requestedSchema: {
+          type: "object" as const,
+          properties: {
+            approval: {
+              type: "string" as const,
+              enum: sessionOffered ? ["once", "session", "always"] : ["once", "always"],
+            },
+          },
+          required: ["approval"],
+        },
+      };
+      const dispatched: Array<CommandId> = [];
+      const dependencies = Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: (id) => projections.getThreadShell(id).pipe(Effect.orDie),
+        getProjectThreadRecords: (target, fields, query) =>
+          orchestrator.getThreadRecords(target.threadId, fields, query).pipe(Effect.orDie),
+        dispatch: (command) =>
+          orchestrator.dispatch(command).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                dispatched.push(command.commandId);
+              }),
+            ),
+          ),
+      });
+      const toolkit = McpHttpServer.layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(dependencies),
+        Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+        Layer.provide(Layer.mock(ScheduledTasks.ScheduledTaskService)({})),
+      );
+      const client = McpSchema.McpServerClient.of({
+        clientId: 1,
+        protocolVersion: "2025-06-18",
+        clientCapabilities: {},
+        clientInfo: { name: "test", version: "1" },
+        initializePayload: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "test", version: "1" },
+        },
+        getClient: Effect.die("unused"),
+      });
+      yield* Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        for (const decision of ["accept", "acceptForSession", "acceptAlways"] as const) {
+          const requestId = RuntimeRequestId.make(decision);
+          const nodeId = NodeId.make(decision);
+          const request = {
+            id: requestId,
+            nodeId,
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "permission" as const,
+            status: "pending" as const,
+            responseCapability: { type: "live" as const, providerSessionId: sessionId },
+            createdAt: now,
+            resolvedAt: null,
+          };
+          yield* projections.apply({
+            id: EventId.make("request:" + decision),
+            type: "runtime-request.updated",
+            threadId,
+            occurredAt: now,
+            payload: request,
+          });
+          yield* projections.apply({
+            id: EventId.make("item:" + decision),
+            type: "turn-item.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make(decision),
+              threadId,
+              runId: null,
+              nodeId,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 1,
+              status: "waiting",
+              title: null,
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+              type: "approval_request",
+              requestId,
+              requestKind: "permission",
+              ...describeMcpElicitation(payload),
+            },
+          });
+          const before = yield* orchestrator.getThreadEventSequence(threadId);
+          const result = yield* server.callTool({
+            name: "t3_pending_request_respond",
+            arguments: { threadId, requestId, decision },
+          });
+          if (!sessionOffered && decision === "acceptForSession") {
+            assert.isTrue(result.isError);
+            assert.deepEqual(yield* projections.getRuntimeRequest(threadId, requestId), request);
+            assert.equal(yield* orchestrator.getThreadEventSequence(threadId), before);
+            // Also exercise the dispatch boundary without the handler's early rejection.
+            const commandId = CommandId.make("unsupported-direct");
+            const rejected = yield* orchestrator
+              .dispatch({
+                type: "runtime-request.respond",
+                commandId,
+                threadId,
+                requestId,
+                decision,
+              })
+              .pipe(Effect.result);
+            assert.isTrue(Result.isFailure(rejected));
+            assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+            assert.deepEqual(yield* projections.getRuntimeRequest(threadId, requestId), request);
+          } else {
+            assert.notEqual(result.isError, true);
+            const resolved = yield* projections.getRuntimeRequest(threadId, requestId);
+            assert.equal(resolved?.status, "resolved");
+            assert.equal(resolved?.decision, decision);
+            const effects = yield* outbox.listByCommandId(dispatched.at(-1)!);
+            assert.equal(effects.length, 1);
+            const response = effects[0]!.request;
+            assert.equal(response.type, "runtime-request.respond");
+            if (response.type !== "runtime-request.respond" || response.decision === undefined)
+              throw new Error("Missing approval response effect");
+            assert.equal(response.decision, decision);
+            assert.deepEqual(toMcpElicitationResponse(payload, response.decision), {
+              action: "accept",
+              ...(decision === "accept"
+                ? {}
+                : { _meta: { persist: decision === "acceptAlways" ? "always" : "session" } }),
+              content: {
+                approval:
+                  decision === "accept"
+                    ? "once"
+                    : decision === "acceptAlways"
+                      ? "always"
+                      : "session",
+              },
+            });
+          }
+        }
+      }).pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, {
+          environmentId: EnvironmentId.make("environment"),
+          requestNamespace: "test",
+          thread: undefined,
+          client: { sessionId: "test", label: "test", access: "full-access" },
+          capabilities: new Set(["orchestration"] as const),
+          issuedAt: 0,
+        }),
+        Effect.provideService(McpSchema.McpServerClient, client),
+        Effect.provide(toolkit),
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each(["live", "stopped", "archived", "deleted", "provider-switched"] as const)(
+  "rechecks MCP caller authority after waiting for dispatch (%s)",
+  (invalidation) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threadId = ThreadId.make("elicitation");
+      const sessionId = ProviderSessionId.make("elicitation-session");
+      const now = yield* DateTime.now;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create"),
+        threadId,
+        projectId: ProjectId.make("project"),
+        title: "Elicitation",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* projections.apply({
+        id: EventId.make("attach"),
+        type: "provider-session.attached",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: sessionId,
+          driver: adapter.driver,
+          providerInstanceId: instanceId,
+          status: "ready",
+          cwd: "/repo",
+          model: modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        },
+      });
+
+      const callerId = ThreadId.make("caller");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-caller"),
+        threadId: callerId,
+        projectId: ProjectId.make("project"),
+        title: "Caller",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("start-caller"),
+        threadId: callerId,
+        messageId: MessageId.make("caller-message"),
+        text: "Work",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const requestId = RuntimeRequestId.make("approval");
+      const request = {
+        id: requestId,
+        nodeId: NodeId.make("approval"),
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "permission" as const,
+        status: "pending" as const,
+        responseCapability: { type: "live" as const, providerSessionId: sessionId },
+        createdAt: now,
+        resolvedAt: null,
+      };
+      yield* projections.apply({
+        id: EventId.make("request"),
+        type: "runtime-request.updated",
+        threadId,
+        occurredAt: now,
+        payload: request,
+      });
+      yield* projections.apply({
+        id: EventId.make("approval-item"),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make("approval"),
+          threadId,
+          runId: null,
+          nodeId: request.nodeId,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          status: "waiting",
+          title: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+          type: "approval_request",
+          requestId,
+          requestKind: "permission",
+        },
+      });
+      const dispatchStarted = yield* Deferred.make<void>();
+      const lockHeld = yield* Deferred.make<void>();
+      const releaseLock = yield* Deferred.make<void>();
+      const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+      const lock = yield* executor
+        .withLock(
+          threadId,
+          Deferred.succeed(lockHeld, undefined).pipe(Effect.andThen(Deferred.await(releaseLock))),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(lockHeld);
+      const dispatched: Array<CommandId> = [];
+      const dependencies = Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: (id) => projections.getThreadShell(id).pipe(Effect.orDie),
+        getProjectThreadRecords: (target, fields, query) =>
+          orchestrator.getThreadRecords(target.threadId, fields, query).pipe(Effect.orDie),
+        dispatch: (command) =>
+          Effect.sync(() => dispatched.push(command.commandId)).pipe(
+            Effect.andThen(Deferred.succeed(dispatchStarted, undefined)),
+            Effect.andThen(orchestrator.dispatch(command)),
+          ),
+      });
+      const toolkit = McpHttpServer.layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(dependencies),
+        Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+        Layer.provide(Layer.mock(ScheduledTasks.ScheduledTaskService)({})),
+      );
+      const client = McpSchema.McpServerClient.of({
+        clientId: 1,
+        protocolVersion: "2025-06-18",
+        clientCapabilities: {},
+        clientInfo: { name: "test", version: "1" },
+        initializePayload: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "test", version: "1" },
+        },
+        getClient: Effect.die("unused"),
+      });
+
+      yield* Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        const response = yield* server
+          .callTool({
+            name: "t3_pending_request_respond",
+            arguments: { threadId, requestId, decision: "accept" },
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(dispatchStarted);
+        if (invalidation === "stopped") {
+          const run = (yield* projections.getThreadProjection(callerId)).runs[0]!;
+          yield* projections.apply({
+            id: EventId.make("stop-caller"),
+            type: "run.updated",
+            threadId: callerId,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...run, status: "completed", completedAt: now },
+          });
+        } else {
+          const thread = yield* projections.getThread(callerId);
+          yield* projections.apply({
+            id: EventId.make("invalidate-caller"),
+            type: "thread.metadata-updated",
+            threadId: callerId,
+            occurredAt: now,
+            payload: {
+              ...thread,
+              ...(invalidation === "archived" ? { archivedAt: now } : {}),
+              ...(invalidation === "deleted" ? { deletedAt: now } : {}),
+              ...(invalidation === "provider-switched"
+                ? {
+                    providerInstanceId: ProviderInstanceId.make("other"),
+                    modelSelection: {
+                      ...modelSelection,
+                      instanceId: ProviderInstanceId.make("other"),
+                    },
+                  }
+                : {}),
+            },
+          });
+        }
+        yield* Deferred.succeed(releaseLock, undefined);
+        yield* Fiber.join(lock);
+        const result = yield* Fiber.join(response);
+        assert.equal(dispatched.length, 1);
+        if (invalidation === "live") {
+          assert.notEqual(result.isError, true);
+          assert.equal(
+            (yield* projections.getRuntimeRequest(threadId, requestId))?.status,
+            "resolved",
+          );
+          assert.equal((yield* outbox.listByCommandId(dispatched[0]!)).length, 1);
+        } else {
+          assert.isTrue(result.isError);
+          assert.deepEqual(yield* projections.getRuntimeRequest(threadId, requestId), request);
+          assert.deepEqual(yield* outbox.listByCommandId(dispatched[0]!), []);
+        }
+      }).pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, {
+          environmentId: EnvironmentId.make("environment"),
+          requestNamespace: "test",
+          thread: {
+            threadId: callerId,
+            providerInstanceId: instanceId,
+            providerSessionId: "caller-session",
+          },
+          client: undefined,
+          capabilities: new Set(["orchestration"] as const),
+          issuedAt: 0,
+        }),
+        Effect.provideService(McpSchema.McpServerClient, client),
+        Effect.provide(toolkit),
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each(["client", "ui", "downgraded"] as const)(
+  "checks approval deadlines and current caller authority (%s)",
+  (source) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threadId = ThreadId.make("thread:approval-response-deadline");
+      const sessionId = ProviderSessionId.make("session:approval-response-deadline");
+      const now = yield* DateTime.now;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-approval-response-deadline"),
+        threadId,
+        projectId: ProjectId.make("project:approval-response-deadline"),
+        title: "Approval deadline",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* projections.apply({
+        id: EventId.make("attach-approval-response-deadline"),
+        type: "provider-session.attached",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: sessionId,
+          driver: adapter.driver,
+          providerInstanceId: instanceId,
+          status: "ready",
+          cwd: "/repo",
+          model: modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        },
+      });
+      if (source === "downgraded") {
+        yield* orchestrator.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("downgrade"),
+          threadId,
+          runtimeMode: "approval-required",
+        });
+      }
+      for (const kind of ProviderRequestKind.literals) {
+        for (const age of [4 * 60 * 60 * 1000 - 1, 4 * 60 * 60 * 1000, 4 * 60 * 60 * 1000 + 1]) {
+          for (const decision of ProviderApprovalDecision.literals) {
+            const requestId = RuntimeRequestId.make(`request:${kind}:${age}:${decision}`);
+            const request = {
+              id: requestId,
+              nodeId: NodeId.make(`node:${kind}:${age}`),
+              providerTurnId: null,
+              nativeRequestRef: null,
+              kind,
+              status: "pending" as const,
+              responseCapability: { type: "live" as const, providerSessionId: sessionId },
+              createdAt: DateTime.makeUnsafe(DateTime.toEpochMillis(now) - age),
+              resolvedAt: null,
+            };
+            yield* projections.apply({
+              id: EventId.make(`seed:${requestId}`),
+              type: "runtime-request.updated",
+              threadId,
+              occurredAt: now,
+              payload: request,
+            });
+            const commandId = CommandId.make(`respond:${requestId}:${decision}`);
+            const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+            const result = yield* orchestrator
+              .dispatch({
+                type: "runtime-request.respond",
+                commandId,
+                threadId,
+                requestId,
+                decision,
+              })
+              .pipe(
+                Effect.provideService(
+                  DispatchModeLimit,
+                  source === "ui"
+                    ? undefined
+                    : {
+                        runtimeMode: "full-access",
+                        interactionMode: "default",
+                        ...(source === "downgraded" ? { callerThreadId: threadId } : {}),
+                      },
+                ),
+                Effect.result,
+              );
+            if (
+              (source !== "downgraded" && age < 4 * 60 * 60 * 1000) ||
+              decision === "decline" ||
+              decision === "cancel"
+            ) {
+              assert.isTrue(Result.isSuccess(result));
+              assert.equal(
+                (yield* projections.getRuntimeRequest(threadId, requestId))?.status,
+                "resolved",
+              );
+              assert.equal((yield* outbox.listByCommandId(commandId)).length, 1);
+              const duplicateCommandId = CommandId.make(`duplicate:${requestId}`);
+              const duplicate = yield* orchestrator
+                .dispatch({
+                  type: "runtime-request.respond",
+                  commandId: duplicateCommandId,
+                  threadId,
+                  requestId,
+                  decision,
+                })
+                .pipe(Effect.result);
+              assert.isTrue(Result.isFailure(duplicate));
+              assert.deepEqual(yield* outbox.listByCommandId(duplicateCommandId), []);
+            } else {
+              assert.isTrue(Result.isFailure(result));
+              assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+              assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+              if (age >= 4 * 60 * 60 * 1000) {
+                assert.deepEqual(
+                  yield* projections.getRuntimeRequest(threadId, requestId),
+                  request,
+                );
+              }
+            }
+          }
+        }
+      }
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("marks a never-visited thread's first completion unread", () =>
