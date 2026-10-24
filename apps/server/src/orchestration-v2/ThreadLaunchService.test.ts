@@ -1317,8 +1317,7 @@ it.effect.each(["failed", "interrupted"] as const)(
         createdBy: "user",
         creationSource: "web",
       });
-      // Nor does the next one, though the run that message started is now the
-      // latest and carries no workspace preparation.
+      // An explicit follow-up also leaves the unresolved setup hold intact.
       yield* threads.sendToThread({
         projectId,
         commandId: CommandId.make(`command:launch:late-queued-follow-up-${ending}:again`),
@@ -1326,7 +1325,7 @@ it.effect.each(["failed", "interrupted"] as const)(
         messageId: MessageId.make(`message:launch:late-queued-follow-up-${ending}:again`),
         text: "Sent after that",
         attachments: [],
-        mode: "auto",
+        mode: "queue",
         createdBy: "user",
         creationSource: "web",
       });
@@ -2169,4 +2168,76 @@ it.effect("replays an accepted send after the project disables the instance", ()
       assert.fail(`expected ThreadManagementProviderInstanceDisabledError, got ${fresh._tag}`);
     }
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
+});
+
+it.effect("auto send refuses a preparing turn without persisting a queued message", () => {
+  const harness = makeHarness({ runSetup: () => Effect.never });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const launched = yield* launches.launch(
+      launchInput({
+        command: "command:auto-preparing",
+        thread: "thread:auto-preparing",
+        message: "First message",
+        workspace: { type: "worktree", baseRef: "main" },
+      }),
+    );
+    const before = yield* threads.getThreadProjection(launched.threadId);
+    const error = yield* threads
+      .sendToThread({
+        projectId,
+        commandId: CommandId.make("command:auto-preparing:send"),
+        threadId: launched.threadId,
+        messageId: MessageId.make("message:auto-preparing:send"),
+        text: "Change direction",
+        attachments: [],
+        mode: "auto",
+        createdBy: "agent",
+        creationSource: "mcp",
+      })
+      .pipe(Effect.flip);
+    assert.instanceOf(error, ThreadManagement.ThreadManagementNoSteerableRunError);
+    assert.include(error.message, launched.threadId);
+    assert.include(error.message, 'mode:"queue"');
+    const after = yield* threads.getThreadProjection(launched.threadId);
+    assert.deepEqual(after.messages, before.messages);
+    assert.deepEqual(after.runs, before.runs);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("auto send starts an idle thread", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const threadId = ThreadId.make("thread:auto-idle");
+    yield* threads.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("command:auto-idle:create"),
+      threadId,
+      projectId,
+      title: "Idle",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+    const sent = yield* threads.sendToThread({
+      projectId,
+      threadId,
+      commandId: CommandId.make("command:auto-idle:send"),
+      messageId: MessageId.make("message:auto-idle:send"),
+      text: "Start working",
+      attachments: [],
+      mode: "auto",
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+    assert.equal(sent.delivery, "started");
+    assert.equal(sent.projection.runs.length, 1);
+    assert.equal(sent.turnItem?.inputIntent, "turn_start");
+  }).pipe(Effect.provide(harness.layer));
 });

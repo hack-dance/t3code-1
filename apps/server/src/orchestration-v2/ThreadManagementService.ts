@@ -227,10 +227,11 @@ export class ThreadManagementNoSteerableRunError extends Schema.TaggedError<Thre
   {
     threadId: ThreadId,
     mode: Schema.Literals(["steer", "restart"]),
+    cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
-    return `Thread ${this.threadId} has no running turn that can be ${this.mode === "steer" ? "steered" : "restarted"}.`;
+    return `Thread ${this.threadId} has no running turn that can be ${this.mode === "steer" ? "steered" : "restarted"}. Use mode:"queue" for a separate follow-up turn.`;
   }
 }
 
@@ -773,8 +774,6 @@ const make = Effect.gen(function* () {
         type: input.mode === "steer" ? "steer_active" : "restart_active",
         targetRunId: steerableRun.id,
       };
-    } else if (input.mode === "auto" && steerableRun !== undefined) {
-      dispatchMode = { type: "steer_active", targetRunId: steerableRun.id };
     } else {
       dispatchMode = {
         type: input.mode === "queue" ? "queue_after_active" : "start_immediately",
@@ -792,9 +791,28 @@ const make = Effect.gen(function* () {
       attachments: input.attachments,
       ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
       dispatchMode,
+      ...(input.mode === "auto" || input.mode === "steer"
+        ? { deliveryIntent: "steer_or_start" as const }
+        : {}),
       createdBy: input.createdBy,
       creationSource: input.creationSource,
-    });
+    }).pipe(
+      Effect.tap(() =>
+        input.mode === "auto" || input.mode === "steer"
+          ? orchestrator.awaitSteeringDelivery(input)
+          : Effect.void,
+      ),
+      Effect.catchTags({
+        OrchestratorThreadNotSteerableError: (cause) =>
+          Effect.fail(
+            new ThreadManagementNoSteerableRunError({
+              threadId: input.threadId,
+              mode: "steer",
+              cause,
+            }),
+          ),
+      }),
+    );
     const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
       messageIds: [input.messageId],
       turnItemTypes: ["user_message"],

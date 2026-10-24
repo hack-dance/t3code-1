@@ -271,6 +271,9 @@ export const layerExecutor: Layer.Layer<
                         commandId: CommandId.make(`command:steer-follow-up:${effect.id}`),
                         threadId: effect.threadId,
                         messageId: message.id,
+                        ...(effect.request.strictDelivery
+                          ? { deliveryIntent: "start_if_idle" as const }
+                          : {}),
                         text: message.text,
                         ...(message.context ? { context: message.context } : {}),
                         attachments: message.attachments,
@@ -306,15 +309,18 @@ export const layerExecutor: Layer.Layer<
                         // retrying cannot change.
                         Effect.catchTags({
                           ThreadManagementProviderInstanceDisabledError: (disabledError) =>
-                            Effect.logInfo(
-                              "orchestration-v2.effect-worker.steer-follow-up-disabled",
-                              {
-                                threadId: effect.threadId,
-                                messageId: message.id,
-                                projectId: disabledError.projectId,
-                                instanceId: disabledError.instanceId,
-                              },
-                            ),
+                            effect.request.type === "provider-turn.steer" &&
+                            effect.request.strictDelivery
+                              ? Effect.fail(disabledError)
+                              : Effect.logInfo(
+                                  "orchestration-v2.effect-worker.steer-follow-up-disabled",
+                                  {
+                                    threadId: effect.threadId,
+                                    messageId: message.id,
+                                    projectId: disabledError.projectId,
+                                    instanceId: disabledError.instanceId,
+                                  },
+                                ),
                         }),
                       );
                   }),
@@ -363,7 +369,31 @@ export const layerExecutor: Layer.Layer<
                   providerTurnStart.start({
                     threadId: effect.threadId,
                     runId: effect.request.runId,
-                    willRetry,
+                    willRetry: effect.request.strictDelivery ? false : willRetry,
+                  }),
+                ),
+                Effect.tap(() =>
+                  Effect.gen(function* () {
+                    if (
+                      effect.request.type !== "provider-turn.restart" ||
+                      !effect.request.strictDelivery
+                    )
+                      return;
+                    // Startup can persist a failed attempt without throwing. Verify the
+                    // replacement itself before acknowledging restart-based steering.
+                    const projection = yield* threads.getThreadRecords(effect.threadId, [
+                      "attempts",
+                    ]);
+                    const replacementAttemptId = effect.request.replacementAttemptId;
+                    const attempt = projection.attempts.find(
+                      (attempt) => attempt.id === replacementAttemptId,
+                    );
+                    if (attempt?.status !== "running" && attempt?.status !== "completed") {
+                      return yield* new ProviderTurnStartService.ProviderTurnStartError({
+                        runId: effect.request.runId,
+                        cause: "The replacement attempt did not start successfully.",
+                      });
+                    }
                   }),
                 ),
                 Effect.mapError(
@@ -757,7 +787,12 @@ export const layerWithOptions = (
           }
 
           const error = Cause.pretty(exit.cause);
-          const nonRetryable = isNonRetryableProviderTurnControlFailure(effect.request.type, error);
+          const strictSteering =
+            (effect.request.type === "provider-turn.steer" ||
+              effect.request.type === "provider-turn.restart") &&
+            effect.request.strictDelivery === true;
+          const nonRetryable =
+            !strictSteering && isNonRetryableProviderTurnControlFailure(effect.request.type, error);
           yield* Effect.logWarning("Orchestration effect execution failed", {
             effectId: effect.id,
             effectType: effect.request.type,
@@ -769,7 +804,7 @@ export const layerWithOptions = (
             ? yield* outbox
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
-            : effect.attemptCount >= maxAttempts
+            : strictSteering || effect.attemptCount >= maxAttempts
               ? yield* outbox
                   .fail({ effectId: effect.id, workerId, error })
                   .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))

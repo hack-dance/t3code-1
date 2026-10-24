@@ -47,9 +47,10 @@ const AttachmentDiscardTool = Tool.make("t3_attachment_discard", {
 const AttachmentSendTool = Tool.make("t3_thread_send_attachments", {
   ...shared,
   description:
-    "Send uploaded attachments to this thread or any other thread in this environment. Each call is a new message, without a retry key. Acceptance does not mean the provider can consume the attachment or has finished the turn. The target cannot have broader permission modes than the caller; failures retain claimed files when dispatch outcome is uncertain.",
+    "Send uploaded attachments to this thread or any other thread in this environment. Each call is a new message, without a retry key. Omitted mode (auto) starts an idle thread or steers its active turn; unavailable steering fails with a queue suggestion. Use mode='queue' for a separate follow-up, 'steer' for an active turn, or 'restart' to interrupt and restart it. Acceptance does not mean the provider can consume the attachment or has finished the turn. The target cannot have broader permission modes than the caller; failures retain claimed files when dispatch outcome is uncertain.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
+    mode: Schema.optional(Schema.Literals(["auto", "queue", "steer", "restart"])),
     message: Schema.optional(Schema.String.check(Schema.isMaxLength(120000))),
     attachments: Schema.Array(McpAttachmentInput).check(
       Schema.isMinLength(1),

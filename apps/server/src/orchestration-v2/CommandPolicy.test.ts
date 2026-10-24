@@ -219,3 +219,31 @@ layer("CommandPolicyV2", (it) => {
     }),
   );
 });
+
+it("resolves strict automatic delivery against current runs without queue fallbacks", () => {
+  assert.deepEqual(
+    CommandPolicy.resolveMessageDispatchIntent(
+      dispatchProjection(),
+      { type: "start_immediately" },
+      "steer_or_start",
+    ),
+    { type: "start_immediately" },
+  );
+  for (const status of ["preparing", "starting", "running", "waiting"] as const) {
+    const projection = dispatchProjection(baseCapabilities);
+    const active = projection.runs[0]!;
+    assert.deepEqual(
+      CommandPolicy.resolveMessageDispatchIntent(
+        {
+          ...projection,
+          runs: [{ ...active, status }],
+          messages: [{ ...projection.messages[0]!, text: "/compact" }],
+          providerTurns: [],
+        },
+        { type: "start_immediately" },
+        "steer_or_start",
+      ),
+      { type: "steer_active", targetRunId: activeRunId },
+    );
+  }
+});

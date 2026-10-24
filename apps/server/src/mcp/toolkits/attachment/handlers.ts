@@ -99,7 +99,7 @@ export const layer = McpToolAccess.toLayer(
               ...(caller === undefined ? {} : { senderThreadId: caller.id }),
               text: input.message ?? "",
               attachments,
-              mode: "auto",
+              mode: input.mode ?? "auto",
               createdBy: "agent",
               creationSource: "mcp",
             }).pipe(
@@ -109,7 +109,12 @@ export const layer = McpToolAccess.toLayer(
                       code: "orchestration_error",
                       message: error.message,
                     })
-                  : unavailable(),
+                  : error._tag === "ThreadManagementNoSteerableRunError"
+                    ? new OrchestratorMcpFailure({
+                        code: "thread_not_sendable",
+                        message: error.message,
+                      })
+                    : unavailable(),
               ),
             );
             return {

@@ -612,6 +612,9 @@ const threadStartCommand = Command.make("start", {
 );
 
 const threadSendCommand = Command.make("send", {
+  queue: Flag.Boolean("queue").pipe(
+    Flag.withDescription("Queue a separate follow-up turn instead of steering active work."),
+  ),
   ...projectLocationFlags,
   thread: threadArgument,
   message: messageArgument,
@@ -619,7 +622,7 @@ const threadSendCommand = Command.make("send", {
   json: jsonFlag,
 }).pipe(
   Command.withDescription(
-    "Send a message to a thread. A busy thread gets it as its next turn; nothing is interrupted.",
+    "Send a message: start an idle thread or steer its active turn. If steering is unavailable, fails; use --queue for a separate follow-up turn.",
   ),
   Command.withHandler((flags) =>
     Effect.gen(function* () {
@@ -630,7 +633,7 @@ const threadSendCommand = Command.make("send", {
         Effect.fn("cli.thread.send")(function* (tools) {
           const sent = yield* tools.call(
             "t3_thread_send",
-            { threadId, message, mode: "queue" },
+            { threadId, message, mode: flags.queue ? "queue" : "auto" },
             OrchestratorMcpThreadSendResult,
           );
           if (flags.wait) {

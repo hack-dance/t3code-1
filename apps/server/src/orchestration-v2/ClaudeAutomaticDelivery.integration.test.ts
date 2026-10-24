@@ -127,6 +127,8 @@ const deliveries = [
   "child completion",
   "scheduled message",
   "user steering",
+  "API auto send",
+  "API send after provider completion",
   "promoted queued message",
 ] as const;
 
@@ -351,6 +353,78 @@ it.effect.each(deliveries)(
                 ),
               ),
             );
+          } else if (
+            delivery === "API auto send" ||
+            delivery === "API send after provider completion"
+          ) {
+            yield* Effect.gen(function* () {
+              const threads = yield* ThreadManagementService.ThreadManagementService;
+              const send = threads.sendToThread({
+                projectId,
+                threadId,
+                messageId,
+                commandId: CommandId.make("api-steer"),
+                text: "Change direction now.",
+                attachments: [],
+                mode: "auto",
+                createdBy: "agent",
+                creationSource: "mcp",
+              });
+              if (delivery === "API send after provider completion") {
+                const sink = yield* EventSink.EventSinkV2;
+                const turn = before.providerTurns.find((turn) => turn.status === "running")!;
+                yield* sink.write({
+                  events: [
+                    {
+                      id: EventId.make("provider-finished"),
+                      type: "provider-turn.updated",
+                      threadId,
+                      runId: parent.id,
+                      occurredAt: yield* DateTime.now,
+                      payload: { ...turn, status: "completed" },
+                    },
+                  ],
+                });
+                const error = yield* send.pipe(Effect.flip);
+                assert.instanceOf(
+                  error,
+                  ThreadManagementService.ThreadManagementNoSteerableRunError,
+                );
+                assert.include(error.message, threadId);
+                assert.include(error.message, 'mode:"queue"');
+                const after = yield* orchestrator.getThreadProjection(threadId);
+                assert.deepEqual(after.messages, before.messages);
+                assert.deepEqual(after.runs, before.runs);
+                assert.equal(offers.length, 1);
+                return;
+              }
+              const accepted = yield* watch(
+                (event) => event.type === "message.updated" && event.payload.id === messageId,
+              );
+              const sending = yield* send.pipe(Effect.forkScoped);
+              yield* Fiber.join(accepted);
+              yield* worker.drain();
+              const sent = yield* Fiber.join(sending);
+              assert.equal(sent.delivery, "steered");
+              assert.equal(sent.run.id, parent.id);
+              assert.equal(sent.projection.runs.length, 1);
+            }).pipe(
+              Effect.provide(
+                ThreadManagementService.layer.pipe(
+                  Layer.provide(
+                    CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+                  ),
+                  Layer.provide(ServerSettings.layerTest()),
+                  Layer.provide(
+                    Layer.mock(LegacyV1ThreadImporter.LegacyV1ThreadImporter)({
+                      ensureTranscript: () =>
+                        Effect.succeed({ importedThreadCount: 0, importedMessageCount: 0 }),
+                    }),
+                  ),
+                ),
+              ),
+            );
+            if (delivery === "API send after provider completion") return;
           } else if (delivery === "user steering") {
             yield* orchestrator.dispatch({
               type: "message.dispatch",
@@ -399,7 +473,9 @@ it.effect.each(deliveries)(
           }
           yield* worker.drain();
           const explicitSteer =
-            delivery === "user steering" || delivery === "promoted queued message";
+            delivery === "user steering" ||
+            delivery === "API auto send" ||
+            delivery === "promoted queued message";
           assert.equal(batchAbort.signal.aborted, explicitSteer);
           assert.equal(offers.length, explicitSteer ? 2 : 1);
           const finished = yield* watch(
