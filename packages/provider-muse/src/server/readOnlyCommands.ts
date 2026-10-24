@@ -26,20 +26,26 @@ interface CommandSpec {
   readonly operands: boolean;
 }
 
-const SPECS: Record<string, CommandSpec> = {
-  ls: { short: "1aAdFhilLnRrStu", long: new Set(["--all", "--long"]), operands: true },
-  pwd: { short: "LP", operands: false },
-  cat: { short: "nbsvAETe", operands: true },
-  head: { short: "qv", numeric: new Set(["-n", "-c"]), bareNumber: true, operands: true },
-  tail: { short: "qvfF", numeric: new Set(["-n", "-c"]), bareNumber: true, operands: true },
-  wc: { short: "lwcmL", operands: true },
-  stat: { short: "L", operands: true },
-  which: { short: "a", operands: true },
-  whoami: { short: "", operands: false },
-  uname: { short: "amnrsvpio", operands: false },
-  tree: { short: "adfFiClsh", numeric: new Set(["-L"]), operands: true },
-  grep: { short: "rRniIlLcEFwvxHhsoq", numeric: new Set(["-m", "-A", "-B", "-C"]), operands: true },
-};
+const SPECS: ReadonlyMap<string, CommandSpec> = new Map(
+  Object.entries({
+    ls: { short: "1aAdFhilLnRrStu", long: new Set(["--all", "--long"]), operands: true },
+    pwd: { short: "LP", operands: false },
+    cat: { short: "nbsvAETe", operands: true },
+    head: { short: "qv", numeric: new Set(["-n", "-c"]), bareNumber: true, operands: true },
+    tail: { short: "qvfF", numeric: new Set(["-n", "-c"]), bareNumber: true, operands: true },
+    wc: { short: "lwcmL", operands: true },
+    stat: { short: "L", operands: true },
+    which: { short: "a", operands: true },
+    whoami: { short: "", operands: false },
+    uname: { short: "amnrsvpio", operands: false },
+    tree: { short: "adfFiClsh", numeric: new Set(["-L"]), operands: true },
+    grep: {
+      short: "rRniIlLcEFwvxHhsoq",
+      numeric: new Set(["-m", "-A", "-B", "-C"]),
+      operands: true,
+    },
+  } satisfies Record<string, CommandSpec>),
+);
 
 // `find` predicates that only test or print to stdout.
 const FIND_PREDICATES_WITH_VALUE = new Set([
@@ -121,16 +127,19 @@ function segmentIsReadOnly(segment: string): boolean {
   if (head === undefined) return false;
   if (head === "cd") return args.length === 1 && !args[0]!.startsWith("-");
   if (head === "find") return findIsReadOnly(args);
-  const spec = SPECS[head];
+  const spec = SPECS.get(head);
   return spec !== undefined && argsMatchSpec(spec, args);
 }
 
 export function isReadOnlyCommand(command: string | undefined): boolean {
   if (command === undefined) return false;
-  const trimmed = command.trim();
+  // Printable ASCII, spaces and tabs only, checked before trimming: JS trim() strips characters
+  // (NBSP, CR, Unicode spaces) that a shell treats as part of a word.
+  if (!/^[\x20-\x7e\t]*$/.test(command)) return false;
+  const trimmed = command.replace(/^[ \t]+|[ \t]+$/g, "");
   if (trimmed.length === 0 || trimmed.length > 2000) return false;
   const segments = trimmed.split("&&");
   if (segments.some((segment) => UNSAFE_CHARS.test(segment))) return false;
   if (!segments.every(segmentIsReadOnly)) return false;
-  return segments.some((segment) => !/^\s*cd\b/.test(segment));
+  return segments.some((segment) => !/^[ \t]*cd\b/.test(segment));
 }

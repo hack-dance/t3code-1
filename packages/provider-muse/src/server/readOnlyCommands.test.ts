@@ -68,6 +68,16 @@ describe("isReadOnlyCommand", () => {
     "ls \u2014la",
     "npm test",
     "ls && touch x",
+    "constructor",
+    "constructor -x",
+    "toString",
+    "__proto__",
+    "hasOwnProperty x",
+    "\u00a0ls",
+    "ls\u00a0&&pwd",
+    "ls\r",
+    "ls\u2028",
+    "\u3000ls",
   ])("rejects %s", (command) => {
     expect(isReadOnlyCommand(command)).toBe(false);
   });
