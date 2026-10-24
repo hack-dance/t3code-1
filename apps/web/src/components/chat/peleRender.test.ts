@@ -7,6 +7,8 @@ const FLOWCHART = `flowchart LR
   A[Agent] -->|reads| B{Sidecar}
   B -->|primary| C[Extension]
   B -.->|fallback| D[cua-driver]
+  I@{ img: "https://example.com/track.png", label: "Remote", pos: "t" }
+  C --> I
   click A "https://example.com/phish" "tooltip"
 `;
 
