@@ -70,6 +70,7 @@ import {
   pendingBackgroundTurnItems,
 } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Context from "effect/Context";
+import { approvalActionDigest } from "./ApprovalAction.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -2448,6 +2449,34 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
 
+    if (command.claudeToolPolicy !== undefined) {
+      const limit = yield* DispatchModeLimit;
+      if (limit !== undefined) {
+        const caller =
+          limit.callerThreadId === undefined
+            ? undefined
+            : yield* projectionStore
+                .getThreadShell(limit.callerThreadId)
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+                  ),
+                );
+        if (
+          (caller !== undefined && !isLiveCallerShell(caller, limit.callerProviderInstanceId)) ||
+          (caller ?? limit).runtimeMode !== "full-access" ||
+          (caller ?? limit).interactionMode !== "default"
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Installing a tool policy requires a live full-access/default caller.",
+          });
+        }
+      }
+    }
+
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
     const thread: OrchestrationV2AppThread = {
@@ -2460,6 +2489,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       modelSelection: command.modelSelection,
       runtimeMode: command.runtimeMode,
       interactionMode: command.interactionMode,
+      ...(command.claudeToolPolicy === undefined
+        ? {}
+        : { claudeToolPolicy: command.claudeToolPolicy }),
       branch: command.branch,
       worktreePath: command.worktreePath,
       activeProviderThreadId: null,
@@ -7667,16 +7699,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       const now = yield* DateTime.now;
       const mcpLimit = yield* DispatchModeLimit;
-      const expiresAt = approvalRequestExpiresAt(runtimeRequest);
       if (
-        expiresAt !== null &&
-        DateTime.toEpochMillis(now) >= expiresAt
+        command.expectActionDigest !== undefined &&
+        command.expectActionDigest !== approvalActionDigest(runtimeRequest)
       ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
-          cause:
-            "This approval expired after 4 hours. Request a new approval in the thread.",
+          cause: "Approval action digest mismatch.",
+        });
+      }
+      const expiresAt = approvalRequestExpiresAt(runtimeRequest);
+      if (expiresAt !== null && DateTime.toEpochMillis(now) >= expiresAt) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This approval expired after 4 hours. Request a new approval in the thread.",
         });
       }
       const granting =

@@ -4102,6 +4102,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           "CodexAdapterV2.buildApprovalRequestArtifacts",
         )(function* (input: {
           readonly context: ActiveCodexTurnContext;
+          readonly action?: unknown;
           readonly nativeItemId: string;
           readonly nativeRequestId: string;
           readonly requestKind: ProviderRequestKind;
@@ -4160,6 +4161,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               strength: "strong",
             },
             kind: input.requestKind,
+            action: {
+              native: input.action ?? null,
+              requestKind: input.requestKind,
+              prompt: input.prompt ?? null,
+              appName: input.appName ?? null,
+              options: input.options ?? null,
+              cwd: owner.input.runtimePolicy.cwd,
+            },
             status: "pending",
             responseCapability: {
               type: "live",
@@ -5187,6 +5196,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const nativeRequestId = payload.approvalId ?? payload.itemId;
             const artifacts = yield* buildApprovalRequestArtifacts({
               context,
+              action: payload,
               nativeItemId: payload.itemId,
               nativeRequestId,
               requestKind: "command",
@@ -5258,6 +5268,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
             const artifacts = yield* buildApprovalRequestArtifacts({
               context,
+              action: payload,
               nativeItemId: payload.itemId,
               nativeRequestId: payload.itemId,
               requestKind: "file-change",
@@ -5326,6 +5337,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const requestKind = providerRequestKindFromPermissions(payload.permissions);
             const artifacts = yield* buildApprovalRequestArtifacts({
               context,
+              action: payload,
               nativeItemId: payload.itemId,
               nativeRequestId: payload.itemId,
               requestKind,
@@ -5407,6 +5419,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const described = describeMcpElicitation(payload);
             const artifacts = yield* buildApprovalRequestArtifacts({
               context,
+              action: payload,
               nativeItemId: nativeRequestId,
               nativeRequestId,
               requestKind: "mcp-elicitation",
@@ -5474,6 +5487,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const nativeRequestId = payload.approvalId ?? payload.callId;
             const artifacts = yield* buildApprovalRequestArtifacts({
               context,
+              action: payload,
               nativeItemId: payload.callId,
               nativeRequestId,
               requestKind: "command",
@@ -5543,6 +5557,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
             const artifacts = yield* buildApprovalRequestArtifacts({
               context,
+              action: payload,
               nativeItemId: payload.callId,
               nativeRequestId: payload.callId,
               requestKind: "file-change",

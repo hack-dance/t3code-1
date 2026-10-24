@@ -1837,6 +1837,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       });
       const nodeId = idAllocator.derive.approvalNode({ requestId });
       const request: OrchestrationV2RuntimeRequest = {
+        action: { native, body },
         id: requestId,
         nodeId,
         providerTurnId: turn.providerTurn.id,

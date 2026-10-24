@@ -134,6 +134,8 @@ import {
   type CompiledClaudeModelSelection,
 } from "../../claudeModelOptions.ts";
 import * as ServerConfig from "../../config.ts";
+import { claudeToolPolicyAllows } from "./ClaudeToolPolicy.ts";
+import { actionDigest } from "../ApprovalAction.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { spawnAndCollect } from "@t3tools/provider-core/server/snapshotProbe";
@@ -1300,6 +1302,7 @@ export function makeClaudeQueryOptions(input: {
   readonly canUseTool?: CanUseTool;
   readonly onUserDialog?: ClaudeQueryOptions["onUserDialog"];
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
+  readonly hooks?: ClaudeQueryOptions["hooks"];
   readonly allowDangerouslySkipPermissions?: boolean;
   readonly appendSystemPromptFileText?: string;
 }): ClaudeAgentSdkQueryOptions {
@@ -1364,6 +1367,7 @@ export function makeClaudeQueryOptions(input: {
     ...(input.allowedTools === undefined ? {} : { allowedTools: [...input.allowedTools] }),
     ...(input.disallowedTools === undefined ? {} : { disallowedTools: [...input.disallowedTools] }),
     ...(input.canUseTool === undefined ? {} : { canUseTool: input.canUseTool }),
+    ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
     ...(input.allowDangerouslySkipPermissions === true
       ? { allowDangerouslySkipPermissions: true }
       : {}),
@@ -2036,6 +2040,7 @@ function readOnlyPolicyAllowsGlobalReads(
 function permissionModeForClaudeRuntimePolicy(
   runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
 ): PermissionMode {
+  if (runtimePolicy.claudeToolPolicy !== undefined) return "default";
   if (runtimePolicy.interactionMode === "plan") {
     return "plan";
   }
@@ -2083,6 +2088,7 @@ function permissionModeForClaudeRuntimePolicy(
 }
 
 export interface ClaudeRuntimeQueryPolicy {
+  readonly toolPolicy?: import("@t3tools/contracts").ClaudeToolPolicy;
   readonly permissionMode: PermissionMode;
   readonly tools?: ClaudeAgentSdkQueryTools;
   readonly allowedTools?: ReadonlyArray<string>;
@@ -2104,6 +2110,14 @@ export function claudeRuntimeQueryPolicyForRuntimePolicy(
   runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
   availability: ClaudeBypassAvailability = CLAUDE_BYPASS_FULLY_AVAILABLE,
 ): ClaudeRuntimeQueryPolicy {
+  if (runtimePolicy.claudeToolPolicy !== undefined) {
+    return {
+      permissionMode: "default",
+      installPermissionCallback: true,
+      allowedTools: runtimePolicy.claudeToolPolicy.allowedTools,
+      toolPolicy: runtimePolicy.claudeToolPolicy,
+    };
+  }
   const requestedMode = permissionModeForClaudeRuntimePolicy(runtimePolicy);
   const downgraded = requestedMode === "bypassPermissions" && availability.bypassDisabled;
   const permissionMode = downgraded
@@ -2199,6 +2213,7 @@ function claudeRuntimeQueryPolicyKey(policy: ClaudeRuntimeQueryPolicy): string {
     permissionMode: policy.permissionMode,
     tools: policy.tools,
     allowedTools: policy.allowedTools,
+    toolPolicy: policy.toolPolicy,
     allowDangerouslySkipPermissions: policy.allowDangerouslySkipPermissions,
     installPermissionCallback: policy.installPermissionCallback,
   });
@@ -3881,6 +3896,7 @@ function claudeProposedPlan(input: unknown): string | null {
 }
 
 export interface ClaudeAdapterV2Options {
+  readonly permissionAuditPath?: string;
   readonly instanceId: ProviderInstanceId;
   readonly settings: ClaudeSettings;
   readonly environment: NodeJS.ProcessEnv;
@@ -6406,6 +6422,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly nativeItemId: string;
           readonly nativeRequestId: string;
           readonly requestKind: OrchestrationV2RuntimeRequest["kind"];
+          readonly action?: unknown;
           readonly prompt?: string;
           readonly presentation?: ReturnType<typeof claudeApprovalPresentation>;
           readonly questions?: ReadonlyArray<OrchestrationV2UserInputQuestion>;
@@ -6463,6 +6480,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               strength: "strong",
             },
             kind: input.requestKind,
+            ...(input.action === undefined ? {} : { action: input.action }),
             status: "pending",
             responseCapability: {
               type: "live",
@@ -8979,6 +8997,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             nativeItemId: nativeRequestId,
             nativeRequestId,
             requestKind,
+            action: { toolName, toolInput, cwd: context.input.runtimePolicy.cwd },
             prompt,
             presentation: claudeApprovalPresentation({
               permissionMode: context.queryPolicy.permissionMode,
@@ -9306,6 +9325,80 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   allowDangerouslySkipPermissions: queryPolicy.allowDangerouslySkipPermissions,
                 }),
             canUseTool,
+            ...(queryPolicy.toolPolicy === undefined
+              ? {}
+              : {
+                  // SDK prefix rules cannot validate gh methods or log auto-approvals. The hook
+                  // gates every call before SDK rule matching; disallowed rules mean ask here.
+                  hooks: {
+                    PreToolUse: [
+                      {
+                        hooks: [
+                          async (hookInput) => {
+                            if (hookInput.hook_event_name !== "PreToolUse") return {};
+                            const context = await runPromise(Ref.get(activeTurn));
+                            if (context === null)
+                              return {
+                                hookSpecificOutput: {
+                                  hookEventName: "PreToolUse" as const,
+                                  permissionDecision: "deny" as const,
+                                },
+                              };
+                            const policy = context.input.runtimePolicy.claudeToolPolicy;
+                            if (
+                              policy &&
+                              claudeToolPolicyAllows({
+                                policy,
+                                toolName: hookInput.tool_name,
+                                toolInput: hookInput.tool_input,
+                              }) &&
+                              adapterOptions.permissionAuditPath !== undefined
+                            ) {
+                              const logged = await runPromise(
+                                fileSystem
+                                  .writeFileString(
+                                    adapterOptions.permissionAuditPath,
+                                    JSON.stringify({
+                                      approver: "policy",
+                                      quote: policy.id,
+                                      threadId: turnInput.threadId,
+                                      sessionId: nativeThreadId,
+                                      requestId: hookInput.tool_use_id,
+                                      actionDigest: actionDigest({
+                                        toolName: hookInput.tool_name,
+                                        toolInput: hookInput.tool_input,
+                                        cwd: turnInput.runtimePolicy.cwd,
+                                      }),
+                                      time: DateTime.formatIso(await runPromise(DateTime.now)),
+                                    }) + "\n",
+                                    { flag: "a", mode: 0o600 },
+                                  )
+                                  .pipe(
+                                    Effect.as(true),
+                                    Effect.catchCause(() => Effect.succeed(false)),
+                                  ),
+                              );
+                              if (logged)
+                                return {
+                                  hookSpecificOutput: {
+                                    hookEventName: "PreToolUse" as const,
+                                    permissionDecision: "allow" as const,
+                                  },
+                                };
+                            }
+                            return {
+                              hookSpecificOutput: {
+                                hookEventName: "PreToolUse" as const,
+                                permissionDecision: "ask" as const,
+                                permissionDecisionReason: "This action needs the owner's approval.",
+                              },
+                            };
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                }),
             onUserDialog,
             supportedDialogKinds: ["resume_return"],
             ...(appendSystemPromptFileText === undefined ? {} : { appendSystemPromptFileText }),
@@ -10495,6 +10588,7 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
       settings: { ...config, enabled, binaryPath },
       environment: claudeEnvironment,
       attachmentsDir: serverConfig.attachmentsDir,
+      permissionAuditPath: path.join(serverConfig.stateDir, "permission-audit.jsonl"),
       fileSystem,
       path,
       crypto,
@@ -10543,6 +10637,7 @@ const makeDefaultClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2.layer")(function* 
     settings: DEFAULT_CLAUDE_SETTINGS,
     environment: hostEnvironment,
     attachmentsDir: serverConfig.attachmentsDir,
+    permissionAuditPath: path.join(serverConfig.stateDir, "permission-audit.jsonl"),
     fileSystem,
     path,
     crypto,

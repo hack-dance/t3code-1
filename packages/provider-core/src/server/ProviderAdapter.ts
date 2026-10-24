@@ -1,6 +1,7 @@
 import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
 import {
   ChatAttachment,
+  ClaudeToolPolicy,
   CheckpointId,
   MessageId,
   ModelSelection,
@@ -46,6 +47,7 @@ import type {
 } from "./selectionTransition.ts";
 
 export const ProviderAdapterV2RuntimePolicy = Schema.Struct({
+  claudeToolPolicy: Schema.optional(ClaudeToolPolicy),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   cwd: Schema.NullOr(Schema.String),

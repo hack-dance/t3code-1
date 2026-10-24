@@ -1285,6 +1285,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const providerThreadId = state?.providerThread.id ?? null;
         const providerTurnId = turn?.providerTurn.id ?? null;
         const runtimeRequest: OrchestrationV2RuntimeRequest = {
+          action: event,
           id: requestId,
           nodeId,
           providerTurnId,

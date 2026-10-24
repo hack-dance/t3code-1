@@ -157,6 +157,9 @@ const pendingRequest = Schema.Union([
   Schema.Struct({
     requestId: RuntimeRequestId,
     kind: ProviderRequestKind,
+    actionDigest: Schema.optional(Schema.String),
+    expiresAt: Schema.optional(Schema.Number),
+    action: Schema.optional(Schema.Unknown),
     prompt: Schema.optional(Schema.String),
     reason: Schema.optional(Schema.String),
     fullAccessOverride: Schema.optional(ProviderApprovalFullAccessOverride),
@@ -199,6 +202,7 @@ const PendingRequestRespondTool = Tool.make("t3_pending_request_respond", {
     answers: Schema.optional(ProviderUserInputAnswers),
     decision: Schema.optional(ProviderApprovalDecision),
     expectRequestKind: Schema.optional(OrchestrationV2RuntimeRequest.fields.kind),
+    expectActionDigest: Schema.optional(Schema.String),
   }),
 })
   .annotate(Tool.Destructive, true)

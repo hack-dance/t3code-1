@@ -14,6 +14,16 @@ const SinkSelection = {
 
 export const RunEventsConfig = Schema.Struct({
   hostLabel: Schema.optional(Schema.String),
+  permissions: Schema.optional(
+    Schema.Struct({
+      environmentId: Schema.NonEmptyString,
+      sourceHost: Schema.NonEmptyString,
+      t3Origin: Schema.NonEmptyString,
+      executable: Schema.NonEmptyString,
+      args: Schema.optional(Schema.Array(Schema.String)),
+      timeoutMs: Schema.optional(Timeout),
+    }),
+  ),
   webhook: Schema.optional(
     Schema.Struct({
       ...SinkSelection,
