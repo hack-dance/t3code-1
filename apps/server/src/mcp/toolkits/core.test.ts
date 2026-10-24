@@ -43,6 +43,7 @@ import {
   describeMcpElicitation,
   toMcpElicitationResponse,
 } from "../../provider/CodexMcpElicitation.ts";
+import { permissionResultFromDecision } from "../../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
 import * as ProviderAdapterRegistry from "../../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -86,8 +87,13 @@ const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
 
 const pendingRequestHarness = (
   modes: Parameters<typeof McpToolAccessTestkit.liveThreadShell>[1] = {},
+  providerInstanceId = ProviderInstanceId.make("codex"),
 ) => {
-  const shell = McpToolAccessTestkit.liveThreadShell(threadId, modes);
+  const shell = {
+    ...McpToolAccessTestkit.liveThreadShell(threadId, modes),
+    providerInstanceId,
+    modelSelection: { instanceId: providerInstanceId, model: "test-model" },
+  };
   const requests: Array<OrchestrationV2RuntimeRequest> = [];
   const items: Array<OrchestrationV2TurnItem> = [];
   const dispatched: Array<OrchestrationV2ServerCommand> = [];
@@ -252,6 +258,60 @@ it.effect("maps approval decisions including acceptForSession to runtime-request
     expect(harness.dispatched.at(-1)).not.toHaveProperty("decision");
   }).pipe(Effect.provide(harness.layer));
 });
+
+it.effect(
+  "rejects acceptAlways for Claude approvals without options before consuming the request",
+  () => {
+    const harness = pendingRequestHarness({}, ProviderInstanceId.make("claude"));
+    const invocation = {
+      ...scope,
+      thread: { ...scope.thread!, providerInstanceId: ProviderInstanceId.make("claude") },
+    };
+    harness.items.splice(
+      0,
+      harness.items.length,
+      ...harness.items.map((item) => {
+        if (item.type !== "approval_request") return item;
+        const { options: _options, ...withoutOptions } = item;
+        return withoutOptions;
+      }),
+    );
+    return Effect.gen(function* () {
+      const result = yield* callPendingTool(
+        "t3_pending_request_respond",
+        { requestId: "request:permission", decision: "acceptAlways" },
+        invocation,
+      );
+      expect(declaredFailure(result)).toMatchObject({ code: "invalid_request" });
+      expect(harness.dispatched).toEqual([]);
+      const pending = yield* callPendingTool("t3_pending_request_list", {}, invocation);
+      expect(pending.structuredContent).toMatchObject({
+        requestIds: expect.arrayContaining(["request:permission"]),
+      });
+      for (const decision of ["accept", "acceptForSession", "decline", "cancel"] as const) {
+        const response = yield* callPendingTool(
+          "t3_pending_request_respond",
+          { requestId: "request:permission", decision },
+          invocation,
+        );
+        expect(response.isError).not.toBe(true);
+        expect(harness.dispatched.at(-1)).toMatchObject({
+          type: "runtime-request.respond",
+          requestId: "request:permission",
+          decision,
+        });
+        expect(
+          permissionResultFromDecision({
+            toolName: "Read",
+            toolInput: { file_path: "/workspace/src/example.ts" },
+            toolUseID: "claude-tool-use",
+            decision,
+          }).behavior,
+        ).toBe(decision === "accept" || decision === "acceptForSession" ? "allow" : "deny");
+      }
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
 
 it.effect("rejects unsupported elicitation grants without consuming the pending request", () => {
   const harness = pendingRequestHarness();

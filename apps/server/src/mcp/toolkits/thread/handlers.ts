@@ -296,8 +296,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       ) {
         if (
           context.item.type === "approval_request" &&
-          context.item.options !== undefined &&
-          !context.item.options.some((option) => option.decision === input.decision)
+          (context.item.options === undefined
+            ? input.decision === "acceptAlways"
+            : !context.item.options.some((option) => option.decision === input.decision))
         ) {
           return yield* new OrchestratorMcpFailure({
             code: "invalid_request",
