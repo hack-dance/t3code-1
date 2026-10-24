@@ -1,4 +1,5 @@
 import { MspError, type SendUserTurnOptions } from "@muse-code/sdk";
+import { isReadOnlyCommand } from "./readOnlyCommands.ts";
 import {
   MUSE_DEFAULT_MODEL,
   ProviderDriverKind,
@@ -1222,7 +1223,14 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
                 })),
               };
         // Muse does not propagate allowAll to workflow children; T3 answers for them.
-        const autoApprove = child && input.runtimePolicy.runtimeMode === "full-access";
+        // Muse has no native "auto" mode, so T3 runs it as :ask-me and answers
+        // allowlisted read-only commands itself, for the thread and its children.
+        const autoApprove =
+          (child && input.runtimePolicy.runtimeMode === "full-access") ||
+          (input.runtimePolicy.runtimeMode === "auto" &&
+            native.type === "approval" &&
+            native.value.subject.kind === "command" &&
+            isReadOnlyCommand(native.value.subject.command));
         const entry: PendingRequest = {
           native,
           request: runtimeRequest,
