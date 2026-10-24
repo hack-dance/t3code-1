@@ -63,6 +63,8 @@ export interface TranscriptUsageFormat<State> {
   readonly usageMarkers: readonly [string, ...string[]];
   parseLine(line: string, state: State): readonly UsageRecord[];
   parseProjected(projected: unknown, state: State): readonly UsageRecord[];
+  /** Removes superseded records, including records restored from an earlier scan. */
+  filterRecords?(records: readonly UsageRecord[], state: State): readonly UsageRecord[];
   /** Cumulative malformed or inconsistent usage records, including skipped records. */
   readMalformedRecords?(state: State): number;
   /**
@@ -101,7 +103,12 @@ export interface ProviderUsageScan {
   readonly message?: string;
   readonly action?: UsageSource["action"];
   readonly files:
-    | readonly { readonly path: string; readonly records: readonly UsageRecord[] }[]
+    | readonly {
+        readonly path: string;
+        readonly records: readonly UsageRecord[];
+        /** Complete retained history for a local file, safe to persist after deletion. */
+        readonly cache?: { readonly size: number; readonly mtimeMs: number };
+      }[]
     | null;
   readonly refreshing?: true;
 }

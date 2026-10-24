@@ -219,7 +219,41 @@ describe("usage pricing", () => {
     expect(lookupRate(table, "claude-fable-5-1[1m]")).toEqual(
       lookupRate(table, "claude-fable-5-1"),
     );
-    expect(lookupRate(table, "anthropic/Claude-Fable-5-1[1m]")).toBeNull();
+    expect(lookupRate(table, "personal/Claude-Fable-5-1[1m]")).toEqual(
+      lookupRate(table, "claude-fable-5-1"),
+    );
+  });
+
+  it("resolves account prefixes without inventing rates", () => {
+    const table = parseRateTable({
+      "gpt-6-sol": rate(2),
+      "xai/grok-example": rate(3),
+      "other/grok-example": rate(4),
+    });
+    for (const prefix of ["personal", "hd", "dio", "work", "ln"]) {
+      expect(lookupRate(table, ` ${prefix}/GPT-6-SOL `)).toEqual(lookupRate(table, "gpt-6-sol"));
+      expect(lookupRate(table, `${prefix}/gpt-6-astra`)).toBeNull();
+    }
+    expect(lookupRate(table, "personal/xai/grok-example")).toEqual(
+      lookupRate(table, "xai/grok-example"),
+    );
+    expect(lookupRate(table, "personal/grok-example")).toBeNull();
+    expect(lookupRate(table, "gpt-6-astra")).toBeNull();
+  });
+
+  it("never strips provider or unknown prefixes to use another provider's rate", () => {
+    const table = parseRateTable({ "xai/shared-model": rate(3) });
+    for (const model of [
+      "openai/shared-model",
+      "personal/openai/shared-model",
+      "unknown/shared-model",
+    ]) {
+      expect(lookupRate(table, model)).toBeNull();
+      expect(priceUsage(table, record(model)).costSource).toBe("unpriced");
+    }
+    expect(lookupRate(table, "personal/xai/shared-model")).toEqual(
+      lookupRate(table, "xai/shared-model"),
+    );
   });
 
   it("adds a bare alias when every qualified entry has the same rate", () => {

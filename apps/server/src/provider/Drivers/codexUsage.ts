@@ -2,6 +2,7 @@ import type { CodexSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import {
   parseTimestampMs,
@@ -65,11 +66,26 @@ function advanceCodexUsage(previous: CodexTokenUsage | null, last: CodexTokenUsa
  * Codex `token_count` events carry no model or service tier, so both are carried forward: the model
  * from the most recent `turn_context`, the tier from the most recent `thread_settings_applied`.
  */
+const ResponseIds = Schema.Array(Schema.String).pipe(
+  Schema.decodeTo(
+    Schema.instanceOf(Set<string>),
+    SchemaTransformation.transform({
+      decode: (ids) => new Set(ids),
+      encode: (ids) => [...ids],
+    }),
+  ),
+);
+
 export const CodexScanState = Schema.Struct({
+  responseIds: ResponseIds,
+  awaitingUsageMirror: Schema.mutableKey(Schema.Boolean),
+  usageMirrorSignature: Schema.mutableKey(Schema.NullOr(Schema.String)),
   model: Schema.mutableKey(Schema.String),
   speed: Schema.mutableKey(Schema.Literals(["standard", "fast", "ultrafast"])),
   sessionId: Schema.mutableKey(Schema.String),
   lastUsageSignature: Schema.mutableKey(Schema.NullOr(Schema.String)),
+  lastBilledUsageSignature: Schema.mutableKey(Schema.NullOr(Schema.String)),
+  lastBilledCumulativeUsage: Schema.mutableKey(Schema.NullOr(CodexTokenUsage)),
   lastCumulativeUsage: Schema.mutableKey(Schema.NullOr(CodexTokenUsage)),
   malformedRecords: Schema.mutableKey(TokenCount),
   sawSessionMeta: Schema.mutableKey(Schema.Boolean),
@@ -83,11 +99,16 @@ export type CodexScanState = typeof CodexScanState.Type;
 
 export function initialCodexScanState(): CodexScanState {
   return {
+    responseIds: new Set(),
+    awaitingUsageMirror: false,
+    usageMirrorSignature: null,
     model: "",
     speed: "standard",
     sessionId: "",
     lastUsageSignature: null,
-    lastCumulativeUsage: null,
+    lastBilledUsageSignature: null,
+    lastBilledCumulativeUsage: null,
+    lastCumulativeUsage: readCodexTokenUsage({ input_tokens: 0, output_tokens: 0 }),
     malformedRecords: 0,
     sawSessionMeta: false,
     modelProvider: "",
@@ -119,7 +140,9 @@ function isForkedSessionMeta(payload: Record<string, unknown>): boolean {
 
 /**
  * Cumulative counters validate request deltas. Older events without cumulative counters use
- * normalized consecutive-request deduplication.
+ * normalized consecutive-request deduplication. Without response IDs, identical requests and
+ * re-emissions can be indistinguishable. Ambiguous legacy events are deliberately dropped;
+ * this can undercount genuine requests, but avoids billing them twice.
  */
 export function parseCodexLine(line: string, state: CodexScanState): UsageRecord | null {
   let parsed: unknown;
@@ -135,6 +158,10 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   if (typeof parsed !== "object" || parsed === null) return null;
 
   const record = parsed as Record<string, unknown>;
+  if (record["type"] === "token_usage_record") {
+    state.awaitingUsageMirror = true;
+    state.usageMirrorSignature = null;
+  }
   const payload = record["payload"];
   if (typeof payload !== "object" || payload === null) return null;
   const payloadRecord = payload as Record<string, unknown>;
@@ -160,6 +187,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   }
 
   if (record["type"] === "turn_context") {
+    state.awaitingUsageMirror = false;
     if (typeof payloadRecord["model"] === "string") state.model = payloadRecord["model"];
     // Model carry is useful for usage, but history recovery needs this context's own identity.
     state.turnId =
@@ -180,20 +208,72 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
     return null;
   }
 
+  if (record["type"] === "token_usage_record") {
+    const responseId = payloadRecord["response_id"];
+    const timestampMs = parseTimestampMs(record["timestamp"]);
+    const usage = readCodexTokenUsage(payloadRecord["usage"]);
+    if (
+      typeof responseId !== "string" ||
+      responseId.length === 0 ||
+      usage === null ||
+      usage.total_tokens !== usage.input_tokens + usage.output_tokens
+    ) {
+      state.malformedRecords += 1;
+      return null;
+    }
+    state.usageMirrorSignature = JSON.stringify(usage);
+    if (state.responseIds.has(responseId)) return null;
+    state.responseIds.add(responseId);
+    if (timestampMs === null || state.model.length === 0) return null;
+    if (state.suppressingForkCopies) {
+      if (timestampMs - state.forkCopyAnchorMs < FORK_COPY_MAX_GAP_MS) {
+        state.forkCopyAnchorMs = timestampMs;
+        return null;
+      }
+      state.suppressingForkCopies = false;
+    }
+    return codexUsageRecord(usage, timestampMs, state, responseId);
+  }
+
   if (payloadType !== "token_count") return null;
+  const awaitingMirror = state.awaitingUsageMirror;
+  state.awaitingUsageMirror = false;
 
   const info = payloadRecord["info"];
   if (typeof info !== "object" || info === null) return null;
   const infoRecord = info as Record<string, unknown>;
 
-  // Codex may re-emit these counters after the model or timestamp becomes available.
+  // A skipped request leaves an unknown recovery baseline. Preserve the billed snapshot
+  // so a later re-emission cannot charge the same request again.
   const timestampMs = parseTimestampMs(record["timestamp"]);
-  if (timestampMs === null || state.model.length === 0) return null;
+  if (timestampMs === null || state.model.length === 0) {
+    state.lastUsageSignature = null;
+    state.lastCumulativeUsage = null;
+    return null;
+  }
 
   const last = readCodexTokenUsage(infoRecord["last_token_usage"]);
   const rawCumulative = infoRecord["total_token_usage"];
   const hasCumulative = rawCumulative !== undefined && rawCumulative !== null;
   const cumulative = hasCumulative ? readCodexTokenUsage(rawCumulative) : null;
+
+  // Modern rollouts pair an identified request with an anonymous count. The mirror still
+  // establishes the cumulative baseline for unrelated legacy requests later in the file.
+  if (
+    awaitingMirror &&
+    (state.usageMirrorSignature === null ||
+      (last !== null && JSON.stringify(last) === state.usageMirrorSignature))
+  ) {
+    state.lastCumulativeUsage =
+      cumulative ??
+      (last === null || state.lastCumulativeUsage === null
+        ? null
+        : advanceCodexUsage(state.lastCumulativeUsage, last));
+    state.lastUsageSignature = last === null ? null : JSON.stringify(last);
+    state.lastBilledUsageSignature = state.lastUsageSignature;
+    state.lastBilledCumulativeUsage = state.lastCumulativeUsage;
+    return null;
+  }
 
   if (state.suppressingForkCopies) {
     if (timestampMs - state.forkCopyAnchorMs < FORK_COPY_MAX_GAP_MS) {
@@ -216,26 +296,35 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   if (cumulative !== null) state.lastCumulativeUsage = cumulative;
   if (last === null || (hasCumulative && cumulative === null)) {
     state.malformedRecords += 1;
+    state.lastUsageSignature = null;
+    state.lastCumulativeUsage = cumulative;
     return null;
   }
 
   // Zero-component counters report context size, not a request: fill_to_context_window, or the
   // post-compaction marker whose total is the new context size (its cumulative may reset to zero).
   if (last.input_tokens + last.output_tokens === 0) {
+    state.lastBilledCumulativeUsage = null;
+    state.lastBilledUsageSignature = null;
     state.lastUsageSignature = null;
+    state.lastCumulativeUsage = cumulative;
     return null;
   }
 
   if (
     cumulative !== null &&
-    previous !== null &&
-    CODEX_USAGE_FIELDS.every((key) => cumulative[key] === previous[key])
+    [previous, state.lastBilledCumulativeUsage].some(
+      (snapshot) =>
+        snapshot !== null && CODEX_USAGE_FIELDS.every((key) => cumulative[key] === snapshot[key]),
+    )
   ) {
     return null;
   }
 
   if (last.total_tokens !== last.input_tokens + last.output_tokens) {
     state.malformedRecords += 1;
+    state.lastUsageSignature = null;
+    state.lastCumulativeUsage = cumulative;
     return null;
   }
 
@@ -245,23 +334,54 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
     const restarted = CODEX_USAGE_FIELDS.every((key) => cumulative[key] === last[key]);
     if (
       !restarted &&
-      !CODEX_USAGE_FIELDS.every((key) => cumulative[key] - (previous?.[key] ?? 0) === last[key])
+      !CODEX_USAGE_FIELDS.every((key) =>
+        previous === null || previous.total_tokens === 0
+          ? cumulative[key] >= last[key]
+          : cumulative[key] - previous[key] === last[key],
+      )
     ) {
       state.malformedRecords += 1;
+      state.lastUsageSignature = null;
+      return null;
+    }
+    // A legacy request billed across a gap has no cumulative identity yet. Without a
+    // known delta, its re-emission only restores that identity; it is not a new bill.
+    if (
+      state.lastBilledCumulativeUsage === null &&
+      signature === state.lastBilledUsageSignature &&
+      (previous === null || restarted)
+    ) {
+      state.lastBilledCumulativeUsage = cumulative;
       return null;
     }
   } else {
-    if (signature === state.lastUsageSignature) return null;
-    // Advance expected totals for billed legacy requests so a cumulative re-emission is stale.
-    const advanced = advanceCodexUsage(previous, last);
-    if (advanced === null) {
+    // Recovery can discard the previous signature without making a billed request replay new.
+    if (signature === state.lastUsageSignature || signature === state.lastBilledUsageSignature) {
+      return null;
+    }
+    // Legacy deltas cannot fill an unknown gap. Only advance a known baseline.
+    const advanced = previous === null ? null : advanceCodexUsage(previous, last);
+    if (previous !== null && advanced === null) {
       state.malformedRecords += 1;
+      state.lastUsageSignature = null;
+      state.lastCumulativeUsage = null;
       return null;
     }
     state.lastCumulativeUsage = advanced;
   }
   state.lastUsageSignature = signature;
+  state.lastBilledUsageSignature = signature;
+  state.lastBilledCumulativeUsage = state.lastCumulativeUsage;
 
+  return codexUsageRecord(last, timestampMs, state, null);
+}
+
+function codexUsageRecord(
+  last: CodexTokenUsage,
+  timestampMs: number,
+  state: CodexScanState,
+  dedupeKey: string | null,
+): UsageRecord | null {
   const inputTokens = last.input_tokens;
   const cachedInputTokens = last.cached_input_tokens;
   const cacheCreationTokens = last.cache_write_input_tokens;
@@ -293,7 +413,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
     state.turnId.length > 0
       ? { unresolvedServiceTierTurnId: state.turnId }
       : {}),
-    dedupeKey: null,
+    dedupeKey,
   };
 }
 
@@ -318,6 +438,8 @@ export const codexUsageFormat: TranscriptUsageFormat<CodexScanState> = {
       type: true,
       id: true,
       session_id: true,
+      response_id: true,
+      usage: true,
       model_provider: true,
       turn_id: true,
       model: true,
@@ -329,7 +451,13 @@ export const codexUsageFormat: TranscriptUsageFormat<CodexScanState> = {
   },
   // `turn_context`, `thread_settings_applied` and `session_meta` lines hold no
   // usage, but they carry the model, tier and session the reducer needs.
-  usageMarkers: ['"token_count"', '"turn_context"', '"thread_settings_applied"', '"session_meta"'],
+  usageMarkers: [
+    '"token_usage_record"',
+    '"token_count"',
+    '"turn_context"',
+    '"thread_settings_applied"',
+    '"session_meta"',
+  ],
   parseLine: (line, state) => orEmpty(parseCodexLine(line, state)),
   parseProjected: (projected, state) => orEmpty(parseCodexRecord(projected, state)),
   state: { initial: initialCodexScanState, schema: CodexScanState },

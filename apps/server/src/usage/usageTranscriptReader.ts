@@ -38,6 +38,7 @@ export interface TranscriptParsePosition {
 }
 
 export interface TranscriptParseResult {
+  readonly finalState: unknown;
   readonly records: readonly UsageRecord[];
   /**
    * Records from a trailing segment the writer has not newline-terminated yet.
@@ -321,8 +322,9 @@ export async function readTranscriptRecords<State>(
     }
 
     return {
-      records,
-      tailRecords,
+      records: format.filterRecords?.(records, tailState) ?? records,
+      tailRecords: format.filterRecords?.(tailRecords, tailState) ?? tailRecords,
+      finalState: tailState,
       malformedRecords: format.readMalformedRecords?.(tailState) ?? 0,
       position: {
         resumeOffset,

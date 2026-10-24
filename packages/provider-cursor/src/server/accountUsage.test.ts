@@ -63,6 +63,22 @@ const readAccountUsage = (
   );
 
 describe("Cursor account history", () => {
+  it.effect("gives the login command when Keychain has no Cursor login", () =>
+    Effect.gen(function* () {
+      const result = yield* readAccountUsage(
+        { kind: "keychain" },
+        0,
+        1781000000000,
+        () => {
+          throw new Error("must not request usage without a login");
+        },
+        Effect.succeed(null),
+      );
+      assert.isTrue(result.missing);
+      assert.include(result.error ?? "", "cursor-agent login");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect(
     "reads paginated Cursor account history including headless calls with separate cache tokens",
     () =>
@@ -349,7 +365,7 @@ describe("readCursorAccountUsage", () => {
         [() => Response.json(fullPage), "Cursor account usage could not be read."],
         [
           () => new Response(null, { status: 401 }),
-          "Sign in to Cursor again to read account usage.",
+          "Run `cursor-agent login` on this server, then refresh account usage.",
         ],
       ] as const) {
         let open = 0;

@@ -152,7 +152,7 @@ export const readCursorAccountUsage = Effect.fn("readCursorAccountUsage")(functi
       error:
         typeof credentialSource === "string"
           ? null
-          : "Cursor account history needs a macOS Keychain CLI login on this server.",
+          : "Run `cursor-agent login` on this Mac to save a Keychain login, then refresh account usage.",
     };
   }
   let accountKey: string | null = null;
@@ -207,7 +207,7 @@ export const readCursorAccountUsage = Effect.fn("readCursorAccountUsage")(functi
             accountKey,
             records: [],
             missing: false,
-            error: "Sign in to Cursor again to read account usage.",
+            error: "Run `cursor-agent login` on this server, then refresh account usage.",
           } satisfies CursorAccountUsageReadResult;
         }
         if (response.status < 200 || response.status >= 300)

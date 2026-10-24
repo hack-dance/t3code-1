@@ -12,6 +12,7 @@ import {
   type UsageSummaryInput,
   UsageReadError,
 } from "@t3tools/contracts";
+import { grokUsageFormat } from "@t3tools/provider-grok/server/usage";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -86,9 +87,11 @@ const scanReaders = BUILT_IN_USAGE_DRIVERS.flatMap((driver) =>
   driver.usage?.kind === "scan" ? [{ driver, reader: driver.usage }] : [],
 );
 
-const transcriptFormats = new Map(
-  transcriptReaders.map(({ reader }) => [reader.provider, reader.format] as const),
-);
+const transcriptFormats = new Map<UsageProviderKind, TranscriptUsageFormat<unknown>>([
+  ...transcriptReaders.map(({ reader }) => [reader.provider, reader.format] as const),
+  // Grok scans usage.json now, but deleted transcripts survive only in this cache.
+  ["grok", grokUsageFormat],
+]);
 
 interface TranscriptSource {
   readonly provider: UsageProviderKind;
@@ -532,7 +535,11 @@ export const make = Effect.gen(function* () {
     }
     const base = parsed.resumed && cached !== undefined ? cached.records : [];
     const seen = new Set<string>();
-    const records = dedupeWithinFile([...base, ...parsed.records], seen);
+    const combined = [...base, ...parsed.records];
+    const records = dedupeWithinFile(
+      format.filterRecords?.(combined, parsed.finalState) ?? combined,
+      seen,
+    );
     const tailRecords = dedupeWithinFile(parsed.tailRecords, seen);
 
     return {
@@ -636,6 +643,7 @@ export const make = Effect.gen(function* () {
       Effect.provideContext(readerContext),
     );
 
+    const beforeScan = new Map(fileCache);
     const scans = Effect.forEach(
       scanReaders,
       ({ driver, reader }) =>
@@ -654,7 +662,35 @@ export const make = Effect.gen(function* () {
                     : Effect.succeed(volumeId),
                   (resolved): ScannedDir => ({
                     ...source,
-                    files: source.files?.map((file) => ({ ...file, malformedRecords: 0 })) ?? null,
+                    files:
+                      source.files?.map((file) => {
+                        if (file.cache !== undefined) {
+                          const entry: CachedFile = {
+                            ...file.cache,
+                            provider: reader.provider,
+                            records: dedupeWithinFile(file.records, new Set()),
+                            tailRecords: [],
+                            malformedRecords: 0,
+                            // Scan readers replace whole documents; they never resume JSONL parsing.
+                            position: {
+                              resumeOffset: 0,
+                              guardLength: 0,
+                              guardHash: 0,
+                              state: null,
+                            },
+                          };
+                          const current = fileCache.get(file.path);
+                          if (
+                            current === beforeScan.get(file.path) ||
+                            current === undefined ||
+                            isLaterRead(entry, current)
+                          ) {
+                            fileCache.set(file.path, entry);
+                            cacheDirty = true;
+                          }
+                        }
+                        return { ...file, malformedRecords: 0 };
+                      }) ?? null,
                     provider: reader.provider,
                     volumeId: resolved,
                   }),

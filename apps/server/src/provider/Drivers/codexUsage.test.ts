@@ -1,6 +1,15 @@
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "@effect/vitest";
 
-import { codexUsageFormat, initialCodexScanState, parseCodexLine } from "./codexUsage.ts";
+import {
+  CodexScanState,
+  codexUsageFormat,
+  initialCodexScanState,
+  parseCodexLine,
+} from "./codexUsage.ts";
+
+const encodeCodexState = Schema.encodeSync(CodexScanState);
+const decodeCodexState = Schema.decodeUnknownSync(CodexScanState);
 
 describe("parseCodexLine", () => {
   const sessionMeta = JSON.stringify({
@@ -48,6 +57,85 @@ describe("parseCodexLine", () => {
       },
     });
 
+  it("bills response IDs once, ignores paired counts, and restores dedupe state from JSON", () => {
+    let state = initialCodexScanState();
+    parseCodexLine(sessionMeta, state);
+    parseCodexLine(turnContext, state);
+    const request = counters(100, 20);
+    const modern = (response_id: string) =>
+      JSON.stringify({
+        timestamp: "2026-08-01T05:17:49.919Z",
+        ordinal: 1,
+        type: "token_usage_record",
+        payload: {
+          response_id,
+          session_id: "session",
+          turn_id: "turn",
+          usage: request,
+          turn_token_usage: request,
+          thread_token_usage: request,
+        },
+      });
+    expect(parseCodexLine(modern("response-1"), state)?.totals.outputTokens).toBe(20);
+    expect(parseCodexLine(counted(request, request), state)).toBeNull();
+    const encoded = JSON.parse(JSON.stringify(encodeCodexState(state)));
+    state = decodeCodexState(encoded);
+    expect(parseCodexLine(modern("response-1"), state)).toBeNull();
+    expect(parseCodexLine(modern("response-2"), state)?.totals.outputTokens).toBe(20);
+    expect(parseCodexLine(counted(request, counters(200, 40)), state)).toBeNull();
+  });
+
+  it("does not fall back to count billing after a malformed identified record", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    expect(
+      parseCodexLine(
+        JSON.stringify({ type: "token_usage_record", payload: { usage: null } }),
+        state,
+      ),
+    ).toBeNull();
+    expect(parseCodexLine(counted(counters(100, 20)), state)).toBeNull();
+  });
+
+  it("keeps unrelated legacy counts after an identified request and its mirror", () => {
+    let state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const modern = JSON.stringify({
+      type: "token_usage_record",
+      timestamp: "2026-08-01T05:17:49.919Z",
+      payload: { response_id: "modern", usage: counters(100, 20) },
+    });
+    expect(parseCodexLine(counted(counters(10, 2), counters(10, 2)), state)).not.toBeNull();
+    expect(parseCodexLine(modern, state)).not.toBeNull();
+    state = decodeCodexState(JSON.parse(JSON.stringify(encodeCodexState(state))));
+    expect(parseCodexLine(counted(counters(100, 20), counters(110, 22)), state)).toBeNull();
+    expect(
+      parseCodexLine(counted(counters(30, 3), counters(140, 25)), state)?.totals.outputTokens,
+    ).toBe(3);
+    expect(parseCodexLine(modern, state)).toBeNull();
+    expect(
+      parseCodexLine(counted(counters(40, 4), counters(180, 29)), state)?.totals.outputTokens,
+    ).toBe(4);
+  });
+
+  it("documents the expected drop of identical legacy requests without cumulative identity", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const request = counters(100, 20);
+    // Two real requests and one replay have identical evidence; prefer underbilling.
+    expect(parseCodexLine(counted(request), state)?.totals.outputTokens).toBe(20);
+    expect(parseCodexLine(counted(request), state)).toBeNull();
+  });
+
+  it("documents the expected drop when a restarted legacy request equals the billed snapshot", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const request = counters(100, 20);
+    // A fresh process can reset to these same counts, indistinguishable from a replay.
+    expect(parseCodexLine(counted(request, request), state)?.totals.outputTokens).toBe(20);
+    expect(parseCodexLine(counted(request, request), state)).toBeNull();
+  });
+
   it("attributes usage to the model from the preceding turn context", () => {
     const state = initialCodexScanState();
     parseCodexLine(sessionMeta, state);
@@ -60,6 +148,199 @@ describe("parseCodexLine", () => {
     expect(record?.totals.uncachedInputTokens).toBe(19239 - 11008);
     expect(record?.totals.cachedInputTokens).toBe(11008);
     expect(record?.totals.reasoningTokens).toBe(116);
+  });
+
+  it("accepts a first cumulative snapshot that includes earlier history", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    expect(
+      parseCodexLine(counted(counters(10, 2), counters(110, 22)), state)?.totals.outputTokens,
+    ).toBe(2);
+  });
+
+  it("accepts a valid request after unattributed cumulative history", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(counted(counters(100, 20), counters(100, 20)), state);
+    parseCodexLine(turnContext, state);
+    expect(
+      parseCodexLine(counted(counters(10, 2), counters(110, 22)), state)?.totals.outputTokens,
+    ).toBe(2);
+  });
+
+  it.each(["invalid-request", "invalid-total", "inconsistent", "invalid-request-total"])(
+    "does not rebill a cumulative request replayed as legacy after %s",
+    (kind) => {
+      const state = initialCodexScanState();
+      parseCodexLine(turnContext, state);
+      const request = counters(100, 20);
+      parseCodexLine(counted(request, request), state);
+      const last =
+        kind === "invalid-request"
+          ? null
+          : kind === "invalid-request-total"
+            ? { ...request, total_tokens: 121 }
+            : request;
+      const total = kind === "invalid-total" ? { input_tokens: "bad" } : counters(250, 50);
+      expect(parseCodexLine(counted(last, total), state)).toBeNull();
+      expect(parseCodexLine(counted(request), state)).toBeNull();
+    },
+  );
+
+  it.each(["invalid-timestamp", "malformed-total"])(
+    "does not rebill a cumulative re-emission after %s",
+    (kind) => {
+      const state = initialCodexScanState();
+      parseCodexLine(turnContext, state);
+      const request = counters(100, 20);
+      const original = counted(request, request);
+      expect(parseCodexLine(original, state)?.totals.outputTokens).toBe(20);
+      const skipped =
+        kind === "invalid-timestamp"
+          ? original.replace("2026-08-01T05:17:49.919Z", "invalid")
+          : counted(request, { input_tokens: "bad" });
+      expect(parseCodexLine(skipped, state)).toBeNull();
+      expect(parseCodexLine(original, state)).toBeNull();
+      expect(
+        parseCodexLine(counted(counters(10, 2), counters(110, 22)), state)?.totals.outputTokens,
+      ).toBe(2);
+    },
+  );
+
+  describe.each([
+    ["cumulative", "cumulative"],
+    ["legacy", "legacy"],
+    ["cumulative", "legacy"],
+    ["legacy", "cumulative"],
+  ])("%s -> %s replay", (from, to) => {
+    it.each([
+      [
+        "invalid-timestamp",
+        counted(counters(10, 2)).replace("2026-08-01T05:17:49.919Z", "invalid"),
+      ],
+      ["invalid-request", counted(null, counters(110, 22))],
+      ["invalid-total", counted(counters(10, 2), { input_tokens: "bad" })],
+      ["invalid-request-total", counted({ ...counters(10, 2), total_tokens: 13 })],
+      ["inconsistent", counted(counters(10, 2), counters(250, 50))],
+    ])("does not rebill across %s", (_kind, skipped) => {
+      const state = initialCodexScanState();
+      parseCodexLine(turnContext, state);
+      const request = counters(100, 20);
+      const original = counted(request, from === "cumulative" ? request : undefined);
+      const replay = counted(request, to === "cumulative" ? request : undefined);
+      const outputs = [original, skipped, replay, counted(counters(30, 5)), counted(request)].map(
+        (line) => parseCodexLine(line, state)?.totals.outputTokens ?? null,
+      );
+      expect(outputs).toEqual([20, null, null, 5, 20]);
+    });
+  });
+
+  it.each(["invalid-timestamp", "malformed-total"])(
+    "preserves legacy recovery identity and an unknown baseline across %s skips",
+    (kind) => {
+      const state = initialCodexScanState();
+      parseCodexLine(turnContext, state);
+      const skipped =
+        kind === "invalid-timestamp"
+          ? counted(counters(10, 2), counters(110, 22)).replace(
+              "2026-08-01T05:17:49.919Z",
+              "invalid",
+            )
+          : counted(counters(10, 2), { input_tokens: "bad" });
+      const outputs = [
+        counted(counters(100, 20), counters(100, 20)),
+        skipped,
+        counted(counters(30, 5)),
+        skipped,
+        counted(counters(30, 5), counters(140, 27)),
+        counted(counters(10, 2), counters(150, 29)),
+      ].map((line) => parseCodexLine(line, state)?.totals.outputTokens ?? null);
+      expect(outputs).toEqual([20, null, 5, null, null, 2]);
+    },
+  );
+
+  it("deduplicates short replay/skip sequences after legacy recovery without losing new deltas", () => {
+    const request = counters(30, 5);
+    const snapshot = counters(140, 27);
+    const skipped = [
+      counted(counters(10, 2)).replace("2026-08-01T05:17:49.919Z", "invalid"),
+      counted(counters(10, 2), { input_tokens: "bad" }),
+    ];
+    const alphabet = [...skipped, counted(request), counted(request, snapshot)];
+    const sequences = (length: number): string[][] =>
+      length === 0
+        ? [[]]
+        : sequences(length - 1).flatMap((prefix) => alphabet.map((line) => [...prefix, line]));
+
+    for (const initialCumulative of [false, true]) {
+      for (const gap of skipped) {
+        for (const suffix of sequences(4)) {
+          const state = initialCodexScanState();
+          parseCodexLine(turnContext, state);
+          const first = counters(100, 20);
+          const lines = [
+            counted(first, initialCumulative ? first : undefined),
+            gap,
+            counted(request),
+            ...suffix,
+            counted(request, snapshot),
+            counted(request, counters(170, 32)),
+            counted(counters(10, 2)),
+            counted(counters(10, 2), counters(180, 34)),
+          ];
+          expect(
+            lines.map((line) => parseCodexLine(line, state)?.totals.outputTokens ?? null),
+            JSON.stringify(lines),
+          ).toEqual([20, null, 5, null, null, null, null, null, 5, 2, null]);
+        }
+      }
+    }
+  });
+
+  it("bills equal requests when a skipped record supplies a valid cumulative baseline", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const request = counters(30, 5);
+    const outputs = [
+      counted(request),
+      counted(null, counters(40, 7)),
+      counted(request, counters(70, 12)),
+    ].map((line) => parseCodexLine(line, state)?.totals.outputTokens ?? null);
+    expect(outputs).toEqual([5, null, 5]);
+  });
+
+  it("recovers after a malformed cumulative snapshot leaves a gap", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    parseCodexLine(counted(counters(100, 20), counters(100, 20)), state);
+    parseCodexLine(counted(counters(10, 2), { input_tokens: "bad" }), state);
+    expect(
+      parseCodexLine(counted(counters(30, 5), counters(140, 27)), state)?.totals.outputTokens,
+    ).toBe(5);
+  });
+
+  it("recovers after a skipped timestamp leaves a cumulative gap", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    parseCodexLine(counted(counters(100, 20), counters(100, 20)), state);
+    parseCodexLine(
+      counted(counters(10, 2), counters(110, 22)).replace("2026-08-01T05:17:49.919Z", "invalid"),
+      state,
+    );
+    expect(
+      parseCodexLine(counted(counters(30, 5), counters(140, 27)), state)?.totals.outputTokens,
+    ).toBe(5);
+  });
+
+  it("resets the baseline at a legacy compaction marker", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    parseCodexLine(counted(counters(100, 20), counters(100, 20)), state);
+    parseCodexLine(counted({ ...counters(0, 0), total_tokens: 500 }), state);
+    expect(state.lastCumulativeUsage).toBeNull();
+    expect(parseCodexLine(counted(counters(10, 2)), state)?.totals.outputTokens).toBe(2);
+    expect(
+      parseCodexLine(counted(counters(20, 3), counters(30, 5)), state)?.totals.outputTokens,
+    ).toBe(3);
   });
 
   it("skips a repeated token_count so deltas are not double counted", () => {

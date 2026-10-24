@@ -145,6 +145,7 @@ const layerService = (input: {
       ServerConfig.layerTest(process.cwd(), NodePath.join(input.home, input.prefix)),
     ),
     Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.succeed(HostProcess.HomeDirectory, input.home)),
     Layer.provideMerge(Layer.succeed(HostProcess.Platform, input.platform ?? "linux")),
     Layer.provideMerge(ServerSettings.layerTest(input.settings)),
     Layer.provideMerge(
@@ -797,6 +798,111 @@ describe("UsageService", () => {
       }).pipe(Effect.scoped),
   );
 
+  it.live(
+    "reads Muse session usage recursively, dedupes record IDs, and leaves cost unpriced",
+    () =>
+      Effect.gen(function* () {
+        const { home, settings } = yield* setup;
+        const root = NodePath.join(
+          home,
+          ".local",
+          "share",
+          "muse",
+          "sessions",
+          "2026",
+          "08",
+          "01",
+          "session-1",
+        );
+        const entry = {
+          schema_version: 1,
+          id: "muse-record-1",
+          sequence: 1,
+          stream: { kind: "session", id: "session-1" },
+          recorded_at: 1785578400123456,
+          record_type: "event",
+          payload_type: "runtime.session",
+          payload: {
+            kind: "run",
+            run_id: "run-1",
+            event: {
+              kind: "model_completed",
+              model: "muse-wonder-1.0",
+              duration_ms: 100,
+              usage: {
+                input_tokens: 100,
+                output_tokens: 20,
+                cached_tokens: 30,
+                cache_read_tokens: 30,
+                cache_write_tokens: 10,
+                reasoning_tokens: 5,
+              },
+            },
+          },
+        };
+        yield* Effect.promise(async () => {
+          await NodeFSP.mkdir(NodePath.join(root, "subagent"), { recursive: true });
+          await NodeFSP.mkdir(NodePath.join(root, "tool-outputs"), { recursive: true });
+          const line = JSON.stringify(entry);
+          await NodeFSP.writeFile(
+            NodePath.join(root, "session.jsonl"),
+            [
+              "{broken",
+              "null",
+              line,
+              line,
+              JSON.stringify({
+                ...entry,
+                id: "attribution",
+                payload: {
+                  ...entry.payload,
+                  event: { ...entry.payload.event, kind: "goal_usage_attribution" },
+                },
+              }),
+            ].join("\n") + "\n",
+          );
+          await NodeFSP.writeFile(
+            NodePath.join(root, "subagent", "session.jsonl"),
+            line +
+              "\n" +
+              JSON.stringify({
+                ...entry,
+                id: "child-record",
+                stream: { kind: "session", id: "child-session" },
+              }) +
+              "\n",
+          );
+          await NodeFSP.writeFile(
+            NodePath.join(root, "tool-outputs", "output.jsonl"),
+            JSON.stringify({ ...entry, id: "ignored-output" }) + "\n",
+          );
+          await NodeFSP.writeFile(
+            NodePath.join(root, "tool-outputs", "session.jsonl"),
+            JSON.stringify({ ...entry, id: "unattributable", stream: {} }) + "\n",
+          );
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* UsageService.make;
+          const summary = yield* service.readSummary(WINDOW);
+          const buckets = summary.buckets.filter((bucket) => bucket.provider === "muse");
+          assert.strictEqual(buckets.length, 1);
+          assert.strictEqual(totalTokens(buckets[0]!.totals), 240);
+          assert.strictEqual(buckets[0]?.unpricedRecords, 2);
+          assert.strictEqual(buckets[0]?.costUsd, 0);
+          assert.strictEqual(
+            summary.sources.find((source) => source.fingerprint.provider === "muse")?.status,
+            "ok",
+          );
+          yield* service.awaitPersisted;
+          const restarted = yield* UsageService.make;
+          assert.deepStrictEqual((yield* restarted.readSummary(WINDOW)).buckets, summary.buckets);
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(layerService({ prefix: "usage-muse", home, settings })),
+        );
+      }).pipe(Effect.scoped),
+  );
+
   it.live("reports missing Pi history and skips malformed records without losing valid usage", () =>
     Effect.gen(function* () {
       const { home, settings } = yield* setup;
@@ -1091,7 +1197,15 @@ describe("UsageService", () => {
         },
         {
           platform: "linux" as const,
-          environment: { CURSOR_API_KEY: "different-account" },
+          environment: { CURSOR_AUTH_TOKEN: "different-account" },
+          authPath: ["config", "cursor", "auth.json"],
+        },
+        {
+          platform: "linux" as const,
+          environment: {
+            CURSOR_API_KEY: "different-account",
+            AGENT_CLI_CREDENTIAL_STORE: "memory",
+          },
           authPath: ["config", "cursor", "auth.json"],
         },
       ].entries()) {
@@ -1117,7 +1231,12 @@ describe("UsageService", () => {
         const summary = yield* service.readSummary(WINDOW);
         const cursor = summary.sources.find((source) => source.fingerprint.provider === "cursor");
         assert.strictEqual(cursor?.status, "missing");
-        assert.include(cursor?.message ?? "", "Cursor CLI login");
+        assert.notInclude(cursor?.message ?? "", "cursor-agent login");
+        for (const name of Object.keys(testCase.environment)) {
+          assert.include(cursor?.message ?? "", name);
+        }
+        assert.include(cursor?.message ?? "", "server environment");
+        assert.isUndefined(cursor?.action);
         assert.isFalse(summary.buckets.some((bucket) => bucket.provider === "cursor"));
       }
     }).pipe(Effect.scoped),
@@ -1417,9 +1536,11 @@ describe("UsageService", () => {
             .map((line) => encodeUnknownJsonString(line))
             .join("\n") + "\n",
         );
-        await NodeFSP.mkdir(NodePath.join(grokHome, "sessions", "session"), { recursive: true });
+        await NodeFSP.mkdir(NodePath.join(grokHome, "sessions", "project", "session"), {
+          recursive: true,
+        });
         await NodeFSP.writeFile(
-          NodePath.join(grokHome, "sessions", "session", "updates.jsonl"),
+          NodePath.join(grokHome, "sessions", "project", "session", "updates.jsonl"),
           encodeUnknownJsonString({
             timestamp: Date.parse("2026-08-01T10:00:00Z") / 1000,
             method: "_x.ai/session/update",
@@ -1881,7 +2002,7 @@ describe("UsageService", () => {
       }).pipe(Effect.scoped),
   );
 
-  it.live.each([4, 5, 6, 7])(
+  it.live.each([4, 5, 6, 7, 8])(
     "upgrades a v%s cache: reparses live Codex usage, keeps deleted rollouts and the old file",
     (version) =>
       Effect.gen(function* () {
@@ -1971,7 +2092,12 @@ describe("UsageService", () => {
             60 + 20 * (version === 4 ? 1 : 2),
           );
           yield* upgraded.awaitPersisted;
-          assert.strictEqual(SCAN_CACHE_FILE_NAME, "usage-scan-cache-v8.json");
+          assert.strictEqual(SCAN_CACHE_FILE_NAME, "usage-scan-cache-v14.json");
+          const persisted = yield* Effect.promise(() => NodeFSP.readFile(cachePath, "utf8"));
+          assert.strictEqual(
+            (decodeUnknownJsonString(persisted) as { version: number }).version,
+            14,
+          );
           assert.strictEqual(
             yield* Effect.promise(() => NodeFSP.readFile(legacyPath, "utf8")),
             legacy,
@@ -2165,6 +2291,121 @@ describe("UsageService", () => {
           Effect.provide(layerService({ prefix: "usage-service-stale-read-test", home, settings })),
         );
       }).pipe(Effect.scoped),
+  );
+
+  it.live("retains migrated Grok cache history and suppresses modern usage mirrors", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      yield* Effect.gen(function* () {
+        const { stateDir } = yield* ServerConfig.ServerConfig;
+        const mtimeMs = yield* Clock.currentTimeMillis;
+        const sessions = NodePath.join(home, "grok", "sessions", "project");
+        const cache = encodeScanCache(
+          new Map(
+            ["deleted", "modern", "legacy"].map((sessionId) => [
+              NodePath.join(sessions, sessionId, "updates.jsonl"),
+              {
+                size: 100,
+                mtimeMs,
+                provider: "grok" as const,
+                records: [
+                  {
+                    provider: "grok" as const,
+                    timestampMs: Date.parse("2026-08-01T10:00:00Z"),
+                    model: "grok",
+                    sessionId,
+                    totals: {
+                      uncachedInputTokens: 10,
+                      cachedInputTokens: 0,
+                      cacheCreationTokens: 0,
+                      outputTokens: 5,
+                      reasoningTokens: 0,
+                    },
+                    reportedCostUsd: null,
+                    speed: "standard" as const,
+                    dedupeKey: sessionId + ":prompt:grok",
+                  },
+                ],
+                tailRecords: [],
+                malformedRecords: 0,
+                position: { resumeOffset: 100, guardLength: 0, guardHash: 0, state: null },
+              },
+            ]),
+          ),
+        );
+        yield* Effect.promise(async () => {
+          await NodeFSP.mkdir(stateDir, { recursive: true });
+          await NodeFSP.writeFile(
+            NodePath.join(stateDir, SCAN_CACHE_FILE_NAME),
+            encodeUnknownJsonString(cache),
+          );
+          await NodeFSP.mkdir(NodePath.join(sessions, "modern"), { recursive: true });
+          await NodeFSP.writeFile(
+            NodePath.join(sessions, "modern", "usage.json"),
+            JSON.stringify({
+              sessionId: "modern",
+              turns: [
+                {
+                  turnNumber: 1,
+                  endedAt: "2026-08-01T10:00:00Z",
+                  inputTokens: 10,
+                  outputTokens: 7,
+                },
+              ],
+            }),
+          );
+          await NodeFSP.mkdir(NodePath.join(sessions, "legacy"), { recursive: true });
+          await NodeFSP.writeFile(
+            NodePath.join(sessions, "legacy", "updates.jsonl"),
+            JSON.stringify({
+              timestamp: Date.parse("2026-08-01T10:00:00Z"),
+              params: {
+                sessionId: "legacy",
+                update: {
+                  sessionUpdate: "turn_completed",
+                  prompt_id: "prompt",
+                  usage: { inputTokens: 10, outputTokens: 5 },
+                },
+              },
+            }) + "\n",
+          );
+        });
+        const service = yield* UsageService.make;
+        assert.strictEqual(totalOutputTokens(yield* service.readSummary(WINDOW)), 17);
+        yield* service.awaitPersisted;
+        const modern = NodePath.join(sessions, "modern", "usage.json");
+        const legacy = NodePath.join(sessions, "legacy", "updates.jsonl");
+        yield* Effect.promise(async () => {
+          const contents = await NodeFSP.readFile(modern, "utf8");
+          await NodeFSP.writeFile(modern, contents.replace('"outputTokens":7', '"outputTokens":9'));
+          await NodeFSP.utimes(modern, mtimeMs / 1000 + 1, mtimeMs / 1000 + 1);
+          const previous = await NodeFSP.readFile(legacy, "utf8");
+          await NodeFSP.writeFile(
+            legacy,
+            previous +
+              previous
+                .replace('"prompt_id":"prompt"', '"prompt_id":"second"')
+                .replace('"outputTokens":5', '"outputTokens":6'),
+          );
+          await NodeFSP.mkdir(NodePath.join(sessions, "new"));
+          await NodeFSP.writeFile(
+            NodePath.join(sessions, "new", "usage.json"),
+            contents.replace('"modern"', '"new"'),
+          );
+        });
+        const restarted = yield* UsageService.make;
+        assert.strictEqual(totalOutputTokens(yield* restarted.readSummary(WINDOW)), 32);
+        // A narrow scan must not replace retained history with only that window's records.
+        yield* restarted.readSummary(NARROW_WINDOW);
+        yield* restarted.awaitPersisted;
+        yield* Effect.promise(() => NodeFSP.rename(sessions, NodePath.join(home, "archived-grok")));
+        assert.strictEqual(totalOutputTokens(yield* restarted.readSummary(WINDOW)), 32);
+        const deleted = yield* UsageService.make;
+        assert.strictEqual(totalOutputTokens(yield* deleted.readSummary(WINDOW)), 32);
+      }).pipe(
+        Effect.provide(layerService({ prefix: "usage-service-grok-migration", home, settings })),
+      );
+    }).pipe(Effect.scoped),
   );
 
   it.live("keeps an absent directory missing when its cached files only contain diagnostics", () =>

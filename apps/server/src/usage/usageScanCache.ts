@@ -9,7 +9,7 @@ import * as Schema from "effect/Schema";
 import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
 
-const USAGE_SCAN_CACHE_VERSION = 8 as const;
+const USAGE_SCAN_CACHE_VERSION = 14 as const;
 const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
@@ -17,8 +17,9 @@ const SPEED_COMPATIBLE_SINCE_VERSION = 4;
  * replace it, dropping saved usage for deleted transcripts. Separate files keep
  * both.
  */
-export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v8.json";
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v14.json";
 export const LEGACY_SCAN_CACHE_FILE_NAMES = [
+  "usage-scan-cache-v8.json",
   "usage-scan-cache-v7.json",
   "usage-scan-cache-v6.json",
   "usage-scan-cache-v5.json",
@@ -311,9 +312,9 @@ export function decodeScanCache(
       continue;
     }
     // Keep history for deleted rollouts, but re-parse incompatible reducer state.
-    // Older Codex entries lack provenance state (v7) or misread compaction and resume counters (v8).
+    // Re-scan Codex history whose old reducer could drop or rebill requests after skipped records.
     const legacy =
-      format.state !== undefined && (version < 6 || (entry.p === "codex" && version < 8));
+      format.state !== undefined && (version < 6 || (entry.p === "codex" && version < 14));
     // A corrupt state disqualifies the entry: resuming with it would attach
     // appended usage to the wrong model or replay fork-copied history.
     if (!legacy && !isValidState.get(entry.p)?.(entry.cs)) continue;
@@ -349,10 +350,12 @@ function makeStateValidators(
 ): ReadonlyMap<UsageProviderKind, (value: unknown) => boolean> {
   return new Map(
     [...formats].map(([provider, format]) => {
-      const isState = format.state === undefined ? undefined : Schema.is(format.state.schema);
+      const isState =
+        format.state === undefined ? undefined : Schema.decodeUnknownExit(format.state.schema);
       return [
         provider,
-        (value: unknown) => value === null || (isState !== undefined && isState(value)),
+        (value: unknown) =>
+          value === null || (isState !== undefined && isState(value)._tag === "Success"),
       ] as const;
     }),
   );
