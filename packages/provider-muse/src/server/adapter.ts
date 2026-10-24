@@ -1229,7 +1229,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           (child && input.runtimePolicy.runtimeMode === "full-access") ||
           (input.runtimePolicy.runtimeMode === "auto" &&
             native.type === "approval" &&
-            native.value.subject.kind === "command" &&
+            native.value.subject.kind === "shell" &&
             isReadOnlyCommand(native.value.subject.command));
         const entry: PendingRequest = {
           native,
