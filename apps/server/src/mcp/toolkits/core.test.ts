@@ -44,6 +44,7 @@ import {
   toMcpElicitationResponse,
 } from "../../provider/CodexMcpElicitation.ts";
 import { permissionResultFromDecision } from "../../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
+import { approvalActionDigest } from "../../orchestration-v2/ApprovalAction.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
 import * as ProviderAdapterRegistry from "../../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -201,6 +202,13 @@ it.effect(
         expect(read.structuredContent).toEqual({
           requestId: `request:${kind}`,
           kind,
+          actionDigest: approvalActionDigest(
+            harness.requests.find((request) => request.id === `request:${kind}`)!,
+          ),
+          expiresAt:
+            DateTime.toEpochMillis(
+              harness.requests.find((request) => request.id === `request:${kind}`)!.createdAt,
+            ) + APPROVAL_REQUEST_TTL_MS,
           prompt:
             "command: cat src/example.ts\ncwd: /workspace\npaths: src/example.ts\npermissions: read",
           reason: "Read the requested file",

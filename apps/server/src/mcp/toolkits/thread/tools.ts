@@ -7,6 +7,7 @@ import {
   OrchestrationV2ContextTransfer,
   TrimmedNonEmptyString,
   ModelSelection,
+  ClaudeToolPolicy,
   RuntimeMode,
   ProviderInteractionMode,
   RuntimeRequestId,
@@ -157,6 +158,9 @@ const pendingRequest = Schema.Union([
   Schema.Struct({
     requestId: RuntimeRequestId,
     kind: ProviderRequestKind,
+    actionDigest: Schema.optional(Schema.String),
+    expiresAt: Schema.optional(Schema.Number),
+    action: Schema.optional(Schema.Unknown),
     prompt: Schema.optional(Schema.String),
     reason: Schema.optional(Schema.String),
     fullAccessOverride: Schema.optional(ProviderApprovalFullAccessOverride),
@@ -199,6 +203,7 @@ const PendingRequestRespondTool = Tool.make("t3_pending_request_respond", {
     answers: Schema.optional(ProviderUserInputAnswers),
     decision: Schema.optional(ProviderApprovalDecision),
     expectRequestKind: Schema.optional(OrchestrationV2RuntimeRequest.fields.kind),
+    expectActionDigest: Schema.optional(Schema.String),
   }),
 })
   .annotate(Tool.Destructive, true)
@@ -214,6 +219,7 @@ const ThreadConfigurationTool = Tool.make("t3_thread_configuration", {
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
+    claudeToolPolicy: Schema.optional(ClaudeToolPolicy),
   }),
 })
   .annotate(Tool.Readonly, true)

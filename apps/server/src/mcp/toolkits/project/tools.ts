@@ -7,6 +7,7 @@ import {
   RunId,
   OrchestrationV2RunStatus,
   OrchestrationV2ThreadLaunchWorkspaceStrategy,
+  ClaudeToolPolicy,
   RuntimeMode,
   ProviderInteractionMode,
   Project,
@@ -117,6 +118,12 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     modelSelection: Schema.optional(ModelSelection),
     runtimeMode: Schema.optional(RuntimeMode),
     interactionMode: Schema.optional(ProviderInteractionMode),
+    claudeToolPolicy: Schema.optional(
+      ClaudeToolPolicy.annotate({
+        description:
+          "Per-thread automatic review rules and exclusions. Requires a full-access/default caller; the new thread still uses default permission callbacks.",
+      }),
+    ),
     workspaceStrategy: Schema.optional(
       OrchestrationV2ThreadLaunchWorkspaceStrategy.annotate({
         description:

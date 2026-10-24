@@ -371,6 +371,13 @@ export const OrchestrationV2LimitRecoveryUpdate = Schema.Struct({
 );
 export type OrchestrationV2LimitRecoveryUpdate = typeof OrchestrationV2LimitRecoveryUpdate.Type;
 
+export const ClaudeToolPolicy = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  allowedTools: Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(128)),
+  disallowedTools: Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(128)),
+});
+export type ClaudeToolPolicy = typeof ClaudeToolPolicy.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -380,6 +387,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  claudeToolPolicy: Schema.optional(ClaudeToolPolicy),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
@@ -1011,6 +1019,8 @@ export function latestProviderTurnForAttempt<
 }
 
 export const OrchestrationV2RuntimeRequest = Schema.Struct({
+  providerSessionId: Schema.optional(ProviderSessionId),
+  action: Schema.optional(Schema.Unknown),
   id: RuntimeRequestId,
   nodeId: NodeId,
   providerTurnId: Schema.NullOr(ProviderTurnId),
@@ -2605,6 +2615,7 @@ export const OrchestrationV2Command = Schema.Union([
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
+    claudeToolPolicy: Schema.optional(ClaudeToolPolicy),
     branch: Schema.NullOr(TrimmedNonEmptyString),
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
     importedNativeThread: Schema.optional(
@@ -2939,6 +2950,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("runtime-request.respond"),
+    expectActionDigest: Schema.optional(TrimmedNonEmptyString),
     commandId: CommandId,
     threadId: ThreadId,
     requestId: RuntimeRequestId,
@@ -3197,6 +3209,7 @@ export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  claudeToolPolicy: Schema.optional(ClaudeToolPolicy),
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
   initialMessage: Schema.optional(
     Schema.Struct({

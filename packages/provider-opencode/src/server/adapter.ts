@@ -1850,6 +1850,8 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           pendingRequests.set(String(requestId), pending);
           pendingRequestsByNativeId.set(nativeRequestId, pending);
           const runtimeRequest: OrchestrationV2RuntimeRequest = {
+            providerSessionId: inputProviderSessionId,
+            action: request,
             id: requestId,
             nodeId,
             providerTurnId: turn.providerTurnId,

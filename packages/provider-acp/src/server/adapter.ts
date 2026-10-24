@@ -5138,6 +5138,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             `${context.nativeTurnId}:approval:${nativeRequestId}`,
           );
           const runtimeRequest: OrchestrationV2RuntimeRequest = {
+            providerSessionId: input.providerSessionId,
+            action: parsed,
             id: requestId,
             nodeId,
             providerTurnId: context.providerTurnId,

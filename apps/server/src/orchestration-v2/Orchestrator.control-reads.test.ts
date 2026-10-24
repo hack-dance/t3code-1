@@ -36,6 +36,7 @@ import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import { approvalActionDigest } from "./ApprovalAction.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -594,6 +595,7 @@ it.effect.each(["client", "ui", "downgraded"] as const)(
               responseCapability: { type: "live" as const, providerSessionId: sessionId },
               createdAt: DateTime.makeUnsafe(DateTime.toEpochMillis(now) - age),
               resolvedAt: null,
+              action: { command: "gh pr view 1", cwd: "/project" },
             };
             yield* projections.apply({
               id: EventId.make(`seed:${requestId}`),
@@ -602,6 +604,19 @@ it.effect.each(["client", "ui", "downgraded"] as const)(
               occurredAt: now,
               payload: request,
             });
+            const mismatched = CommandId.make(`mismatched:${requestId}`);
+            const invalid = yield* orchestrator
+              .dispatch({
+                type: "runtime-request.respond",
+                commandId: mismatched,
+                threadId,
+                requestId,
+                decision,
+                expectActionDigest: "incorrect-digest",
+              })
+              .pipe(Effect.result);
+            assert.isTrue(Result.isFailure(invalid));
+            assert.deepEqual(yield* outbox.listByCommandId(mismatched), []);
             const commandId = CommandId.make(`respond:${requestId}:${decision}`);
             const sequence = yield* orchestrator.getThreadEventSequence(threadId);
             const result = yield* orchestrator
@@ -610,6 +625,7 @@ it.effect.each(["client", "ui", "downgraded"] as const)(
                 commandId,
                 threadId,
                 requestId,
+                expectActionDigest: approvalActionDigest(request),
                 decision,
               })
               .pipe(
@@ -2445,4 +2461,34 @@ it.effect("continues expiring later approvals when one candidate cannot be read"
       1,
     );
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each(["approval-required", "auto-accept-edits", "auto", "full-access"] as const)(
+  "tool policies require full-access authority at dispatch (%s)",
+  (runtimeMode) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make(`policy-${runtimeMode}`);
+      const result = yield* orchestrator
+        .dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`create-${threadId}`),
+          threadId,
+          projectId: ProjectId.make("project"),
+          title: "Review",
+          modelSelection,
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "agent",
+          creationSource: "mcp",
+          claudeToolPolicy: { id: "review", allowedTools: ["Read"], disallowedTools: ["Write"] },
+        })
+        .pipe(
+          Effect.provideService(DispatchModeLimit, { runtimeMode, interactionMode: "default" }),
+          Effect.result,
+        );
+      assert.equal(Result.isSuccess(result), runtimeMode === "full-access");
+    }).pipe(Effect.provide(layerTest)),
 );

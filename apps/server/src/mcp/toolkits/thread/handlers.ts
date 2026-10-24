@@ -10,6 +10,7 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import { approvalActionDigest } from "../../../orchestration-v2/ApprovalAction.ts";
 import * as DateTime from "effect/DateTime";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 
@@ -195,6 +196,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         modelSelection: thread.modelSelection,
         runtimeMode: thread.runtimeMode,
         interactionMode: thread.interactionMode,
+        ...(thread.claudeToolPolicy === undefined
+          ? {}
+          : { claudeToolPolicy: thread.claudeToolPolicy }),
       };
     }),
   ),
@@ -235,12 +239,17 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_pending_request_read: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
-      const { item } = yield* readPendingRequest(input);
+      const { item, request } = yield* readPendingRequest(input);
       if (item.type === "user_input_request")
         return { requestId: input.requestId, questions: item.questions };
       return {
         requestId: input.requestId,
         kind: item.requestKind,
+        actionDigest: approvalActionDigest(request),
+        ...(request.action === undefined ? {} : { action: request.action }),
+        ...(approvalRequestExpiresAt(request) === null
+          ? {}
+          : { expiresAt: approvalRequestExpiresAt(request)! }),
         ...(item.prompt === undefined ? {} : { prompt: item.prompt }),
         ...(item.reason === undefined ? {} : { reason: item.reason }),
         ...(item.fullAccessOverride === undefined
@@ -313,6 +322,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       const result = yield* threads
         .dispatch({
           type: "runtime-request.respond",
+          ...(input.expectActionDigest === undefined
+            ? {}
+            : { expectActionDigest: input.expectActionDigest }),
           threadId: projection.thread.id,
           commandId: yield* newCommandId(),
           requestId: input.requestId,
