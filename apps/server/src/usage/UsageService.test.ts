@@ -1118,6 +1118,7 @@ describe("UsageService", () => {
         const cursor = summary.sources.find((source) => source.fingerprint.provider === "cursor");
         assert.strictEqual(cursor?.status, "missing");
         assert.include(cursor?.message ?? "", "Cursor CLI login");
+        assert.include(cursor?.message ?? "", "cursor-agent login");
         assert.isFalse(summary.buckets.some((bucket) => bucket.provider === "cursor"));
       }
     }).pipe(Effect.scoped),

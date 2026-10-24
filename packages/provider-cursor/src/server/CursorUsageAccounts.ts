@@ -286,7 +286,8 @@ const make = Effect.gen(function* () {
           {
             dir: authPath,
             files: null,
-            message: "Cursor account history needs a Cursor CLI login on this server.",
+            message:
+              "Cursor account history needs a Cursor CLI login. Run `cursor-agent login` on this server, then refresh.",
           },
         ];
       }
