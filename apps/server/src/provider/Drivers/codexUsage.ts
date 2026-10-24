@@ -78,7 +78,8 @@ const ResponseIds = Schema.Array(Schema.String).pipe(
 
 export const CodexScanState = Schema.Struct({
   responseIds: ResponseIds,
-  sawUsageRecord: Schema.mutableKey(Schema.Boolean),
+  awaitingUsageMirror: Schema.mutableKey(Schema.Boolean),
+  usageMirrorSignature: Schema.mutableKey(Schema.NullOr(Schema.String)),
   model: Schema.mutableKey(Schema.String),
   speed: Schema.mutableKey(Schema.Literals(["standard", "fast", "ultrafast"])),
   sessionId: Schema.mutableKey(Schema.String),
@@ -99,7 +100,8 @@ export type CodexScanState = typeof CodexScanState.Type;
 export function initialCodexScanState(): CodexScanState {
   return {
     responseIds: new Set(),
-    sawUsageRecord: false,
+    awaitingUsageMirror: false,
+    usageMirrorSignature: null,
     model: "",
     speed: "standard",
     sessionId: "",
@@ -156,7 +158,10 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   if (typeof parsed !== "object" || parsed === null) return null;
 
   const record = parsed as Record<string, unknown>;
-  if (record["type"] === "token_usage_record") state.sawUsageRecord = true;
+  if (record["type"] === "token_usage_record") {
+    state.awaitingUsageMirror = true;
+    state.usageMirrorSignature = null;
+  }
   const payload = record["payload"];
   if (typeof payload !== "object" || payload === null) return null;
   const payloadRecord = payload as Record<string, unknown>;
@@ -182,6 +187,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   }
 
   if (record["type"] === "turn_context") {
+    state.awaitingUsageMirror = false;
     if (typeof payloadRecord["model"] === "string") state.model = payloadRecord["model"];
     // Model carry is useful for usage, but history recovery needs this context's own identity.
     state.turnId =
@@ -215,6 +221,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
       state.malformedRecords += 1;
       return null;
     }
+    state.usageMirrorSignature = JSON.stringify(usage);
     if (state.responseIds.has(responseId)) return null;
     state.responseIds.add(responseId);
     if (timestampMs === null || state.model.length === 0) return null;
@@ -228,9 +235,9 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
     return codexUsageRecord(usage, timestampMs, state, responseId);
   }
 
-  // Modern rollouts write the identified record before its anonymous token_count mirror.
-  // Even malformed identified records disable the fallback: billing must not overstate.
-  if (payloadType !== "token_count" || state.sawUsageRecord) return null;
+  if (payloadType !== "token_count") return null;
+  const awaitingMirror = state.awaitingUsageMirror;
+  state.awaitingUsageMirror = false;
 
   const info = payloadRecord["info"];
   if (typeof info !== "object" || info === null) return null;
@@ -249,6 +256,24 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   const rawCumulative = infoRecord["total_token_usage"];
   const hasCumulative = rawCumulative !== undefined && rawCumulative !== null;
   const cumulative = hasCumulative ? readCodexTokenUsage(rawCumulative) : null;
+
+  // Modern rollouts pair an identified request with an anonymous count. The mirror still
+  // establishes the cumulative baseline for unrelated legacy requests later in the file.
+  if (
+    awaitingMirror &&
+    (state.usageMirrorSignature === null ||
+      (last !== null && JSON.stringify(last) === state.usageMirrorSignature))
+  ) {
+    state.lastCumulativeUsage =
+      cumulative ??
+      (last === null || state.lastCumulativeUsage === null
+        ? null
+        : advanceCodexUsage(state.lastCumulativeUsage, last));
+    state.lastUsageSignature = last === null ? null : JSON.stringify(last);
+    state.lastBilledUsageSignature = state.lastUsageSignature;
+    state.lastBilledCumulativeUsage = state.lastCumulativeUsage;
+    return null;
+  }
 
   if (state.suppressingForkCopies) {
     if (timestampMs - state.forkCopyAnchorMs < FORK_COPY_MAX_GAP_MS) {
@@ -436,8 +461,6 @@ export const codexUsageFormat: TranscriptUsageFormat<CodexScanState> = {
   parseLine: (line, state) => orEmpty(parseCodexLine(line, state)),
   parseProjected: (projected, state) => orEmpty(parseCodexRecord(projected, state)),
   state: { initial: initialCodexScanState, schema: CodexScanState },
-  filterRecords: (records, state) =>
-    state.sawUsageRecord ? records.filter((record) => record.dedupeKey !== null) : records,
   readMalformedRecords: (state) => state.malformedRecords,
   // A rollout that moved after it was read leaves a copy in both places.
   sharedSessionsAcrossFiles: true,

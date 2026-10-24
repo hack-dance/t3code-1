@@ -12,6 +12,7 @@ import {
   type UsageSummaryInput,
   UsageReadError,
 } from "@t3tools/contracts";
+import { grokUsageFormat } from "@t3tools/provider-grok/server/usage";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -86,9 +87,11 @@ const scanReaders = BUILT_IN_USAGE_DRIVERS.flatMap((driver) =>
   driver.usage?.kind === "scan" ? [{ driver, reader: driver.usage }] : [],
 );
 
-const transcriptFormats = new Map(
-  transcriptReaders.map(({ reader }) => [reader.provider, reader.format] as const),
-);
+const transcriptFormats = new Map<UsageProviderKind, TranscriptUsageFormat<unknown>>([
+  ...transcriptReaders.map(({ reader }) => [reader.provider, reader.format] as const),
+  // Grok scans usage.json now, but deleted transcripts survive only in this cache.
+  ["grok", grokUsageFormat],
+]);
 
 interface TranscriptSource {
   readonly provider: UsageProviderKind;

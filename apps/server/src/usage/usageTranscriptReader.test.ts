@@ -73,7 +73,7 @@ function codexUsageLine(outputTokens: number, secondsOffset: number): string {
 
 describe("readTranscriptRecords resume", () => {
   it.each([0, Infinity])(
-    "retains only identified Codex usage across persisted resume (threshold %s)",
+    "retains pre-upgrade Codex usage across persisted resume (threshold %s)",
     async (streamingThresholdBytes) => {
       const file = NodePath.join(dir, "modern.jsonl");
       const modern = (response_id: string) =>
@@ -97,8 +97,18 @@ describe("readTranscriptRecords resume", () => {
       const combined = TEST_FORMATS.codex.filterRecords?.(
         [...legacy.records, ...first.records],
         first.finalState as Parameters<NonNullable<typeof TEST_FORMATS.codex.filterRecords>>[1],
+      ) ?? [...legacy.records, ...first.records];
+      assert.deepEqual(
+        combined.map((record) => record.dedupeKey),
+        [null, "r1"],
       );
-      assert.equal(combined?.length, 1);
+      const cold = await readTranscriptRecords(file, TEST_FORMATS.codex, undefined, {
+        streamingThresholdBytes,
+      });
+      assert.deepEqual(
+        cold?.records.map((record) => record.dedupeKey),
+        [null, "r1"],
+      );
       const persisted = JSON.parse(JSON.stringify(first.position));
       await NodeFSP.appendFile(file, modern("r1") + modern("r2") + codexUsageLine(10, 4));
       const second = await readTranscriptRecords(file, TEST_FORMATS.codex, persisted, {

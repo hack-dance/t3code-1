@@ -97,6 +97,27 @@ describe("parseCodexLine", () => {
     expect(parseCodexLine(counted(counters(100, 20)), state)).toBeNull();
   });
 
+  it("keeps unrelated legacy counts after an identified request and its mirror", () => {
+    let state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const modern = JSON.stringify({
+      type: "token_usage_record",
+      timestamp: "2026-08-01T05:17:49.919Z",
+      payload: { response_id: "modern", usage: counters(100, 20) },
+    });
+    expect(parseCodexLine(counted(counters(10, 2), counters(10, 2)), state)).not.toBeNull();
+    expect(parseCodexLine(modern, state)).not.toBeNull();
+    state = decodeCodexState(JSON.parse(JSON.stringify(encodeCodexState(state))));
+    expect(parseCodexLine(counted(counters(100, 20), counters(110, 22)), state)).toBeNull();
+    expect(
+      parseCodexLine(counted(counters(30, 3), counters(140, 25)), state)?.totals.outputTokens,
+    ).toBe(3);
+    expect(parseCodexLine(modern, state)).toBeNull();
+    expect(
+      parseCodexLine(counted(counters(40, 4), counters(180, 29)), state)?.totals.outputTokens,
+    ).toBe(4);
+  });
+
   it("documents the expected drop of identical legacy requests without cumulative identity", () => {
     const state = initialCodexScanState();
     parseCodexLine(turnContext, state);

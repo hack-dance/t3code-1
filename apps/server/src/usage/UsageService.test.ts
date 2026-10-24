@@ -1536,9 +1536,11 @@ describe("UsageService", () => {
             .map((line) => encodeUnknownJsonString(line))
             .join("\n") + "\n",
         );
-        await NodeFSP.mkdir(NodePath.join(grokHome, "sessions", "session"), { recursive: true });
+        await NodeFSP.mkdir(NodePath.join(grokHome, "sessions", "project", "session"), {
+          recursive: true,
+        });
         await NodeFSP.writeFile(
-          NodePath.join(grokHome, "sessions", "session", "updates.jsonl"),
+          NodePath.join(grokHome, "sessions", "project", "session", "updates.jsonl"),
           encodeUnknownJsonString({
             timestamp: Date.parse("2026-08-01T10:00:00Z") / 1000,
             method: "_x.ai/session/update",
@@ -2284,6 +2286,93 @@ describe("UsageService", () => {
           Effect.provide(layerService({ prefix: "usage-service-stale-read-test", home, settings })),
         );
       }).pipe(Effect.scoped),
+  );
+
+  it.live("retains migrated Grok cache history and suppresses modern usage mirrors", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      yield* Effect.gen(function* () {
+        const { stateDir } = yield* ServerConfig.ServerConfig;
+        const mtimeMs = yield* Clock.currentTimeMillis;
+        const sessions = NodePath.join(home, "grok", "sessions", "project");
+        const cache = encodeScanCache(
+          new Map(
+            ["deleted", "modern", "legacy"].map((sessionId) => [
+              NodePath.join(sessions, sessionId, "updates.jsonl"),
+              {
+                size: 100,
+                mtimeMs,
+                provider: "grok" as const,
+                records: [
+                  {
+                    provider: "grok" as const,
+                    timestampMs: Date.parse("2026-08-01T10:00:00Z"),
+                    model: "grok",
+                    sessionId,
+                    totals: {
+                      uncachedInputTokens: 10,
+                      cachedInputTokens: 0,
+                      cacheCreationTokens: 0,
+                      outputTokens: 5,
+                      reasoningTokens: 0,
+                    },
+                    reportedCostUsd: null,
+                    speed: "standard" as const,
+                    dedupeKey: sessionId + ":prompt:grok",
+                  },
+                ],
+                tailRecords: [],
+                malformedRecords: 0,
+                position: { resumeOffset: 100, guardLength: 0, guardHash: 0, state: null },
+              },
+            ]),
+          ),
+        );
+        yield* Effect.promise(async () => {
+          await NodeFSP.mkdir(stateDir, { recursive: true });
+          await NodeFSP.writeFile(
+            NodePath.join(stateDir, SCAN_CACHE_FILE_NAME),
+            encodeUnknownJsonString(cache),
+          );
+          await NodeFSP.mkdir(NodePath.join(sessions, "modern"), { recursive: true });
+          await NodeFSP.writeFile(
+            NodePath.join(sessions, "modern", "usage.json"),
+            JSON.stringify({
+              sessionId: "modern",
+              turns: [
+                {
+                  turnNumber: 1,
+                  endedAt: "2026-08-01T10:00:00Z",
+                  inputTokens: 10,
+                  outputTokens: 7,
+                },
+              ],
+            }),
+          );
+          await NodeFSP.mkdir(NodePath.join(sessions, "legacy"), { recursive: true });
+          await NodeFSP.writeFile(
+            NodePath.join(sessions, "legacy", "updates.jsonl"),
+            JSON.stringify({
+              timestamp: Date.parse("2026-08-01T10:00:00Z"),
+              params: {
+                sessionId: "legacy",
+                update: {
+                  sessionUpdate: "turn_completed",
+                  prompt_id: "prompt",
+                  usage: { inputTokens: 10, outputTokens: 5 },
+                },
+              },
+            }) + "\n",
+          );
+        });
+        const service = yield* UsageService.make;
+        assert.strictEqual(totalOutputTokens(yield* service.readSummary(WINDOW)), 17);
+        const restarted = yield* UsageService.make;
+        assert.strictEqual(totalOutputTokens(yield* restarted.readSummary(WINDOW)), 17);
+      }).pipe(
+        Effect.provide(layerService({ prefix: "usage-service-grok-migration", home, settings })),
+      );
+    }).pipe(Effect.scoped),
   );
 
   it.live("keeps an absent directory missing when its cached files only contain diagnostics", () =>
