@@ -286,8 +286,21 @@ const make = Effect.gen(function* () {
           {
             dir: authPath,
             files: null,
-            message:
-              "Cursor account history needs a Cursor CLI login. Run `cursor-agent login` on this server, then refresh.",
+            message: [
+              "Cursor account history needs a persistent Cursor CLI login.",
+              ...(hostEnvironment["CURSOR_AUTH_TOKEN"]?.trim() ||
+              hostEnvironment["CURSOR_API_KEY"]?.trim()
+                ? [
+                    "Remove CURSOR_AUTH_TOKEN and CURSOR_API_KEY from the server environment to use stored account history.",
+                  ]
+                : []),
+              ...(credentialStore === "memory"
+                ? [
+                    "Change AGENT_CLI_CREDENTIAL_STORE from memory to file in the server environment so the login can be saved.",
+                  ]
+                : []),
+              "Restart the server after changing its environment, then refresh account usage.",
+            ].join(" "),
           },
         ];
       }

@@ -1197,7 +1197,15 @@ describe("UsageService", () => {
         },
         {
           platform: "linux" as const,
-          environment: { CURSOR_API_KEY: "different-account" },
+          environment: { CURSOR_AUTH_TOKEN: "different-account" },
+          authPath: ["config", "cursor", "auth.json"],
+        },
+        {
+          platform: "linux" as const,
+          environment: {
+            CURSOR_API_KEY: "different-account",
+            AGENT_CLI_CREDENTIAL_STORE: "memory",
+          },
           authPath: ["config", "cursor", "auth.json"],
         },
       ].entries()) {
@@ -1223,8 +1231,12 @@ describe("UsageService", () => {
         const summary = yield* service.readSummary(WINDOW);
         const cursor = summary.sources.find((source) => source.fingerprint.provider === "cursor");
         assert.strictEqual(cursor?.status, "missing");
-        assert.include(cursor?.message ?? "", "Cursor CLI login");
-        assert.include(cursor?.message ?? "", "cursor-agent login");
+        assert.notInclude(cursor?.message ?? "", "cursor-agent login");
+        for (const name of Object.keys(testCase.environment)) {
+          assert.include(cursor?.message ?? "", name);
+        }
+        assert.include(cursor?.message ?? "", "server environment");
+        assert.isUndefined(cursor?.action);
         assert.isFalse(summary.buckets.some((bucket) => bucket.provider === "cursor"));
       }
     }).pipe(Effect.scoped),

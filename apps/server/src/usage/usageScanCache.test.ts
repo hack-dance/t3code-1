@@ -177,7 +177,7 @@ describe("scan cache round trip", () => {
             speed: "fast",
             sessionId: "session-a",
             lastUsageSignature: null,
-            lastBilledLegacyUsageSignature: undefined,
+            lastBilledUsageSignature: undefined,
             sawSessionMeta: true,
             suppressingForkCopies: false,
             forkCopyAnchorMs: 0,

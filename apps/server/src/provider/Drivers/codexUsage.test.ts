@@ -72,7 +72,7 @@ describe("parseCodexLine", () => {
   });
 
   it.each(["invalid-request", "invalid-total", "inconsistent", "invalid-request-total"])(
-    "does not suppress a valid legacy request after %s",
+    "does not rebill a cumulative request replayed as legacy after %s",
     (kind) => {
       const state = initialCodexScanState();
       parseCodexLine(turnContext, state);
@@ -86,7 +86,7 @@ describe("parseCodexLine", () => {
             : request;
       const total = kind === "invalid-total" ? { input_tokens: "bad" } : counters(250, 50);
       expect(parseCodexLine(counted(last, total), state)).toBeNull();
-      expect(parseCodexLine(counted(request), state)?.totals.outputTokens).toBe(20);
+      expect(parseCodexLine(counted(request), state)).toBeNull();
     },
   );
 
@@ -110,20 +110,32 @@ describe("parseCodexLine", () => {
     },
   );
 
-  it.each([
-    ["invalid-timestamp", counted(counters(10, 2)).replace("2026-08-01T05:17:49.919Z", "invalid")],
-    ["invalid-request", counted(null, counters(110, 22))],
-    ["invalid-total", counted(counters(10, 2), { input_tokens: "bad" })],
-    ["invalid-request-total", counted({ ...counters(10, 2), total_tokens: 13 })],
-    ["inconsistent", counted(counters(10, 2), counters(250, 50))],
-  ])("does not rebill a legacy replay after %s", (_kind, skipped) => {
-    const state = initialCodexScanState();
-    parseCodexLine(turnContext, state);
-    const original = counted(counters(100, 20));
-    const outputs = [original, skipped, original, counted(counters(30, 5)), original].map(
-      (line) => parseCodexLine(line, state)?.totals.outputTokens ?? null,
-    );
-    expect(outputs).toEqual([20, null, null, 5, 20]);
+  describe.each([
+    ["cumulative", "cumulative"],
+    ["legacy", "legacy"],
+    ["cumulative", "legacy"],
+    ["legacy", "cumulative"],
+  ])("%s -> %s replay", (from, to) => {
+    it.each([
+      [
+        "invalid-timestamp",
+        counted(counters(10, 2)).replace("2026-08-01T05:17:49.919Z", "invalid"),
+      ],
+      ["invalid-request", counted(null, counters(110, 22))],
+      ["invalid-total", counted(counters(10, 2), { input_tokens: "bad" })],
+      ["invalid-request-total", counted({ ...counters(10, 2), total_tokens: 13 })],
+      ["inconsistent", counted(counters(10, 2), counters(250, 50))],
+    ])("does not rebill across %s", (_kind, skipped) => {
+      const state = initialCodexScanState();
+      parseCodexLine(turnContext, state);
+      const request = counters(100, 20);
+      const original = counted(request, from === "cumulative" ? request : undefined);
+      const replay = counted(request, to === "cumulative" ? request : undefined);
+      const outputs = [original, skipped, replay, counted(counters(30, 5)), counted(request)].map(
+        (line) => parseCodexLine(line, state)?.totals.outputTokens ?? null,
+      );
+      expect(outputs).toEqual([20, null, null, 5, 20]);
+    });
   });
 
   it("recovers after a malformed cumulative snapshot leaves a gap", () => {
