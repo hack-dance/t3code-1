@@ -290,21 +290,21 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         });
       }
       if (
+        context.item.type === "approval_request" &&
+        (context.item.options === undefined
+          ? input.decision === "acceptAlways"
+          : !context.item.options.some((option) => option.decision === input.decision))
+      ) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "This approval does not support the requested decision.",
+        });
+      }
+      if (
         input.decision === "accept" ||
         input.decision === "acceptForSession" ||
         input.decision === "acceptAlways"
       ) {
-        if (
-          context.item.type === "approval_request" &&
-          (context.item.options === undefined
-            ? input.decision === "acceptAlways"
-            : !context.item.options.some((option) => option.decision === input.decision))
-        ) {
-          return yield* new OrchestratorMcpFailure({
-            code: "invalid_request",
-            message: "This approval does not support the requested decision.",
-          });
-        }
         yield* assertFullAccess(
           context,
           "Granting approvals needs a live full-access/default calling thread or a full-access client.",
