@@ -204,7 +204,39 @@ export const grokUsageFormat: TranscriptUsageFormat<void> = {
 
 const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
-function parseGrokUsageDocument(document: unknown, summary: unknown): readonly UsageRecord[] {
+const isModelUpdate = Schema.is(
+  Schema.Struct({
+    method: Schema.Literal("session/update"),
+    params: Schema.Struct({
+      sessionId: Schema.String,
+      update: Schema.Struct({
+        sessionUpdate: Schema.Literal("user_message_chunk"),
+        _meta: Schema.Struct({ modelId: Schema.String, promptIndex: Schema.Number }),
+      }),
+    }),
+  }),
+);
+
+function collectTurnModel(line: string, models: Map<string, string>): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (!isModelUpdate(parsed)) return;
+  const { sessionId, update } = parsed.params;
+  const { modelId, promptIndex } = update._meta;
+  if (!Number.isSafeInteger(promptIndex) || promptIndex < 0 || !modelId.trim()) return;
+  // Update prompt indexes are zero-based; usage.json turn numbers are one-based.
+  models.set(sessionId + ":" + (promptIndex + 1), modelId);
+}
+
+function parseGrokUsageDocument(
+  document: unknown,
+  summary: unknown,
+  models: ReadonlyMap<string, string>,
+): readonly UsageRecord[] {
   if (typeof document !== "object" || document === null) return [];
   const { sessionId, turns } = document as Record<string, unknown>;
   if (typeof sessionId !== "string" || sessionId.length === 0 || !Array.isArray(turns)) return [];
@@ -212,7 +244,16 @@ function parseGrokUsageDocument(document: unknown, summary: unknown): readonly U
     typeof summary === "object" && summary !== null
       ? (summary as Record<string, unknown>)["current_model_id"]
       : undefined;
-  const model = typeof currentModel === "string" && currentModel.trim() ? currentModel : "unknown";
+  let latestTurn = 0;
+  for (const turn of turns) {
+    if (typeof turn !== "object" || turn === null) continue;
+    const { turnNumber } = turn as Record<string, unknown>;
+    if (typeof turnNumber === "number" && Number.isSafeInteger(turnNumber)) {
+      latestTurn = Math.max(latestTurn, turnNumber);
+    }
+  }
+  const summaryModel =
+    typeof currentModel === "string" && currentModel.trim() ? currentModel : "unknown";
   const records: UsageRecord[] = [];
   const seen = new Set<number>();
   for (const turn of turns) {
@@ -234,7 +275,9 @@ function parseGrokUsageDocument(document: unknown, summary: unknown): readonly U
     records.push({
       provider: "grok",
       timestampMs,
-      model,
+      model:
+        models.get(sessionId + ":" + turnNumber) ??
+        (turnNumber === latestTurn ? summaryModel : "unknown"),
       sessionId,
       totals,
       reportedCostUsd: grokCostTicksToUsd(usage.costUsdTicks),
@@ -296,7 +339,7 @@ export const grokUsageReader: ProviderUsageReader<GrokSettings, Path.Path | File
           if (!exists)
             return { dir, files: null, status: partial ? ("partial" as const) : ("ok" as const) };
           const files: Array<{ path: string; records: readonly UsageRecord[] }> = [];
-          // Current CLI layout is sessions/<encoded cwd>/<session id>. Never read chat/event logs.
+          // Current CLI layout is sessions/<encoded cwd>/<session id>.
           for (const project of yield* readDirectory(dir)) {
             const projectDir = path.join(dir, project);
             for (const session of yield* readDirectory(projectDir)) {
@@ -313,7 +356,19 @@ export const grokUsageReader: ProviderUsageReader<GrokSettings, Path.Path | File
                   ? yield* readJson(path.join(sessionDir, "summary.json"))
                   : null;
                 // Presence owns the session even during a partial write; falling back could bill twice.
-                records = parseGrokUsageDocument(usage, summary);
+                const models = new Map<string, string>();
+                if (names.includes("updates.jsonl")) {
+                  yield* fs.stream(path.join(sessionDir, "updates.jsonl")).pipe(
+                    Stream.decodeText(),
+                    Stream.splitLines,
+                    Stream.runForEach((line) => Effect.sync(() => collectTurnModel(line, models))),
+                    Effect.catch(() => {
+                      partial = true;
+                      return Effect.void;
+                    }),
+                  );
+                }
+                records = parseGrokUsageDocument(usage, summary, models);
               } else if (names.includes("updates.jsonl")) {
                 file = path.join(sessionDir, "updates.jsonl");
                 const legacy: UsageRecord[] = [];

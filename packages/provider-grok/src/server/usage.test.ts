@@ -336,7 +336,7 @@ describe("grokUsageReader", () => {
     JSON.stringify({ sessionId: "s1", updatedAt: "2026-10-24T03:37:06Z", session: turn(1), turns });
 
   it.effect(
-    "reads per-turn usage with summary model and skips zero tokens and duplicate turns",
+    "does not move the summary fallback to older turns when the latest turn has no tokens",
     () =>
       Effect.gen(function* () {
         const sources = yield* scan({
@@ -350,16 +350,65 @@ describe("grokUsageReader", () => {
           (source) => source.files?.flatMap((file) => file.records) ?? [],
         );
         expect(records).toHaveLength(2);
+        expect(records.map((record) => record.model)).toEqual(["unknown", "unknown"]);
         expect(records.map((record) => record.dedupeKey)).toEqual(["s1:1", "s1:2"]);
         expect(records[0]).toMatchObject({
-          model: "grok-4.7",
+          model: "unknown",
           timestampMs: Date.parse("2026-10-24T03:37:06.911Z"),
           totals: { uncachedInputTokens: 100, outputTokens: 20 },
         });
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("uses updates.jsonl only for sessions without usage.json", () =>
+  it.effect(
+    "attributes models by prompt index and limits summary fallback to the latest turn",
+    () =>
+      Effect.gen(function* () {
+        const update = (promptIndex: unknown, modelId: string, sessionId = "s1") =>
+          JSON.stringify({
+            timestamp: 1792813026,
+            method: "session/update",
+            params: {
+              sessionId,
+              update: { sessionUpdate: "user_message_chunk", _meta: { modelId, promptIndex } },
+            },
+          });
+        const sources = yield* scan({
+          "s1/usage.json": usage([turn(4), turn(1), turn(2), turn(3)]),
+          "s1/summary.json": JSON.stringify({ current_model_id: "grok-4.7" }),
+          "s1/updates.jsonl": [
+            update(0, "grok-4.6"),
+            update(1, "grok-4.5"),
+            update(2, "wrong-session", "other"),
+            update("2", "invalid-index"),
+            update(2, " "),
+            "{",
+            "null",
+            legacy,
+          ].join("\n"),
+        });
+        const records = sources.flatMap(
+          (source) => source.files?.flatMap((file) => file.records) ?? [],
+        );
+        expect(records.map(({ dedupeKey, model }) => [dedupeKey, model])).toEqual([
+          ["s1:4", "grok-4.7"],
+          ["s1:1", "grok-4.6"],
+          ["s1:2", "grok-4.5"],
+          ["s1:3", "unknown"],
+        ]);
+        const explicit = yield* scan({
+          "s1/usage.json": usage([turn(1)]),
+          "s1/summary.json": JSON.stringify({ current_model_id: "grok-4.7" }),
+          "s1/updates.jsonl": update(0, "grok-4.6"),
+        });
+        expect(
+          explicit.flatMap((source) => source.files?.flatMap((file) => file.records) ?? [])[0]
+            ?.model,
+        ).toBe("grok-4.6");
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("uses updates.jsonl token totals only for sessions without usage.json", () =>
     Effect.gen(function* () {
       const sources = yield* scan({
         "s1/usage.json": usage([turn(1)]),
