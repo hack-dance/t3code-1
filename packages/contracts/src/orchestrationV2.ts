@@ -2829,7 +2829,9 @@ export const OrchestrationV2Command = Schema.Union([
     usageLimitContinuationOfRunId: Schema.optional(RunId),
     manualContinuationOfRunId: Schema.optional(RunId),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
-    deliveryIntent: Schema.optional(Schema.Literals(["auto", "steer", "restart"])),
+    deliveryIntent: Schema.optional(
+      Schema.Literals(["auto", "steer", "restart", "steer_or_start", "start_if_idle"]),
+    ),
     delegatedCompletion: Schema.optional(
       Schema.Struct({
         parentRunId: RunId,

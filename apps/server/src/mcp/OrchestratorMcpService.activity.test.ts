@@ -299,6 +299,7 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
 });
 
 it("readThread and sendToThread reach threads in other projects", async () => {
+  let rejectSteering = false;
   let parentShell: OrchestrationV2ThreadShell | null = null;
   let parentRuns: ReadonlyArray<unknown> = [
     makeRun({ id: RunId.make("run-parent-live"), ordinal: 1, status: "running" }),
@@ -391,11 +392,20 @@ it("readThread and sendToThread reach threads in other projects", async () => {
                     threadId: input.threadId,
                   }),
                 ),
-          sendToThread: () =>
-            Effect.succeed({
-              run: { id: "run-foreign", status: "queued" },
+          sendToThread: (input) => {
+            expect(input.mode).toBe("auto");
+            if (rejectSteering)
+              return Effect.fail(
+                new ThreadManagementService.ThreadManagementNoSteerableRunError({
+                  threadId: input.threadId,
+                  mode: "steer",
+                }),
+              );
+            return Effect.succeed({
+              run: { id: "run-foreign", status: "starting" },
               delivery: "started",
-            } as unknown as ThreadManagementService.ThreadManagementSendResult),
+            } as unknown as ThreadManagementService.ThreadManagementSendResult);
+          },
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
         ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
@@ -436,6 +446,14 @@ it("readThread and sendToThread reach threads in other projects", async () => {
       message: "hi",
     });
     expect(sent.threadId).toBe(foreignThreadId);
+    rejectSteering = true;
+    const notSteerable = yield* service
+      .sendToThread(makeScope(), { threadId: foreignThreadId, message: "steer" })
+      .pipe(Effect.flip);
+    expect(notSteerable.code).toBe("thread_not_sendable");
+    expect(notSteerable.message).toContain(foreignThreadId);
+    expect(notSteerable.message).toContain('mode:"queue"');
+    rejectSteering = false;
 
     parentRuns = [];
     yield* service.readThread(makeScope(), { threadId: foreignThreadId });

@@ -165,6 +165,15 @@ export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDi
   }
 }
 
+export class OrchestratorThreadNotSteerableError extends Schema.TaggedError<OrchestratorThreadNotSteerableError>()(
+  "OrchestratorThreadNotSteerableError",
+  { threadId: ThreadId, cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return `Thread ${this.threadId} cannot accept steering input. Use mode:"queue" for a separate follow-up turn.`;
+  }
+}
+
 export class OrchestratorThreadAlreadyExistsError extends Schema.TaggedError<OrchestratorThreadAlreadyExistsError>()(
   "OrchestratorThreadAlreadyExistsError",
   { commandId: CommandId, threadId: ThreadId },
@@ -285,6 +294,7 @@ function canReplayCommandReceipt(receiptThreadId: ThreadId, commandThreadId: Thr
 export const OrchestratorV2Error = Schema.Union([
   OrchestratorDispatchError,
   OrchestratorThreadAlreadyExistsError,
+  OrchestratorThreadNotSteerableError,
   OrchestratorCommandRejectedError,
   OrchestratorProjectionError,
   OrchestratorDomainEventStreamError,
@@ -314,6 +324,10 @@ export interface OrchestratorV2Shape {
    * A declined one records no thread event, so a waiter needs this to wake.
    */
   readonly awaitRestartContinuation: (run: OrchestrationV2Run) => Effect.Effect<void>;
+  readonly awaitSteeringDelivery: (input: {
+    readonly commandId: CommandId;
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<void, OrchestratorThreadNotSteerableError>;
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
   ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
@@ -4383,6 +4397,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId: input.command.threadId,
           request: {
             type: "provider-turn.steer",
+            ...(input.command.type === "message.dispatch" &&
+            input.command.deliveryIntent === "steer_or_start"
+              ? { strictDelivery: true }
+              : {}),
             providerSessionId,
             providerThreadId: providerThread.id,
             providerTurnId: providerTurn.id,
@@ -4792,6 +4810,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         threadId: input.command.threadId,
         request: {
           type: "provider-turn.restart",
+          ...(input.command.type === "message.dispatch" &&
+          input.command.deliveryIntent === "steer_or_start"
+            ? { strictDelivery: true, replacementAttemptId: nextAttempt.id }
+            : {}),
           providerSessionId,
           providerThreadId: providerThread.id,
           providerTurnId: providerTurn.id,
@@ -5017,13 +5039,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ]);
       projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     }
+    if (command.deliveryIntent === "start_if_idle" && projection.runs.some(isBlockingRun)) {
+      return yield* new OrchestratorThreadNotSteerableError({
+        threadId: command.threadId,
+        cause: "Another run is active after the steering target completed.",
+      });
+    }
     const modelSelection = command.modelSelection ?? projection.thread.modelSelection;
     let dispatchMode = resolveMessageDispatchIntent(
       projection,
       command.dispatchMode,
       command.deliveryIntent,
     );
-    if (dispatchMode.type === "steer_active") {
+    if (dispatchMode.type === "steer_active" && command.deliveryIntent !== "steer_or_start") {
       const targetRunId = dispatchMode.targetRunId;
       const target = projection.runs.find((run) => run.id === targetRunId);
       const turn = latestProviderTurnForAttempt(
@@ -5222,7 +5250,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : { scheduledTaskId: command.scheduledTaskId }),
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
         forceRestart: dispatchMode.type === "restart_active",
-      });
+      }).pipe(
+        Effect.mapError((cause) =>
+          command.deliveryIntent === "steer_or_start"
+            ? new OrchestratorThreadNotSteerableError({ threadId: command.threadId, cause })
+            : cause,
+        ),
+      );
       return;
     }
 
@@ -12135,6 +12169,37 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       awaitsRestartContinuation(run).pipe(Effect.orElseSucceed(() => false)),
     awaitRestartContinuation: (run) =>
       effectOutbox.awaitSettled(`effect:restart-continuation:${run.id}`).pipe(Effect.ignore),
+    awaitSteeringDelivery: Effect.fn("Orchestrator.awaitSteeringDelivery")(
+      function* (input) {
+        const effects = yield* effectOutbox.listByCommandId(input.commandId);
+        for (const effect of effects) {
+          if (
+            (effect.request.type !== "provider-turn.steer" &&
+              effect.request.type !== "provider-turn.restart") ||
+            !effect.request.strictDelivery
+          )
+            continue;
+          yield* effectOutbox.awaitSettled(effect.id);
+          const settled = yield* effectOutbox.get(effect.id);
+          if (Option.isNone(settled) || settled.value.status !== "succeeded") {
+            return yield* new OrchestratorThreadNotSteerableError({
+              threadId: input.threadId,
+              cause: Option.isNone(settled)
+                ? "Steering effect is missing."
+                : settled.value.lastError,
+            });
+          }
+        }
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            cause._tag === "OrchestratorThreadNotSteerableError"
+              ? cause
+              : new OrchestratorThreadNotSteerableError({ threadId: input.threadId, cause }),
+          ),
+        ),
+    ),
     dispatch: dispatchWithReceipt,
     autoArmLimitRecovery: (input) =>
       threadDispatch.withLock(
@@ -12305,6 +12370,7 @@ const layerUnavailable: Layer.Layer<OrchestratorV2> = Layer.succeed(
     delegatedTaskResultPending: () => Effect.succeed(false),
     restartContinuationPending: () => Effect.succeed(false),
     awaitRestartContinuation: () => Effect.void,
+    awaitSteeringDelivery: () => Effect.void,
     autoArmLimitRecovery: (input) =>
       Effect.fail(new OrchestratorProjectionError({ threadId: input.threadId })),
     dispatch: (command) =>
