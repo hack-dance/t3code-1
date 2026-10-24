@@ -70,6 +70,7 @@ export const CodexScanState = Schema.Struct({
   speed: Schema.mutableKey(Schema.Literals(["standard", "fast", "ultrafast"])),
   sessionId: Schema.mutableKey(Schema.String),
   lastUsageSignature: Schema.mutableKey(Schema.NullOr(Schema.String)),
+  lastBilledLegacyUsageSignature: Schema.mutableKey(Schema.NullOr(Schema.String)),
   lastBilledCumulativeUsage: Schema.mutableKey(Schema.NullOr(CodexTokenUsage)),
   lastCumulativeUsage: Schema.mutableKey(Schema.NullOr(CodexTokenUsage)),
   malformedRecords: Schema.mutableKey(TokenCount),
@@ -88,6 +89,7 @@ export function initialCodexScanState(): CodexScanState {
     speed: "standard",
     sessionId: "",
     lastUsageSignature: null,
+    lastBilledLegacyUsageSignature: null,
     lastBilledCumulativeUsage: null,
     lastCumulativeUsage: null,
     malformedRecords: 0,
@@ -232,6 +234,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   // post-compaction marker whose total is the new context size (its cumulative may reset to zero).
   if (last.input_tokens + last.output_tokens === 0) {
     state.lastBilledCumulativeUsage = null;
+    state.lastBilledLegacyUsageSignature = null;
     state.lastUsageSignature = null;
     state.lastCumulativeUsage = cumulative;
     return null;
@@ -271,7 +274,13 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
       return null;
     }
   } else {
-    if (signature === state.lastUsageSignature) return null;
+    // Recovery can discard the previous signature without making a billed legacy replay new.
+    if (
+      signature === state.lastUsageSignature ||
+      signature === state.lastBilledLegacyUsageSignature
+    ) {
+      return null;
+    }
     // Advance expected totals for billed legacy requests so a cumulative re-emission is stale.
     const advanced = advanceCodexUsage(previous, last);
     if (advanced === null) {
@@ -283,6 +292,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
     state.lastCumulativeUsage = advanced;
   }
   state.lastUsageSignature = signature;
+  state.lastBilledLegacyUsageSignature = cumulative === null ? signature : null;
   state.lastBilledCumulativeUsage = state.lastCumulativeUsage;
 
   const inputTokens = last.input_tokens;

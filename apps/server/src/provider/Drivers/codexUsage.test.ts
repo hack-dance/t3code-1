@@ -110,6 +110,22 @@ describe("parseCodexLine", () => {
     },
   );
 
+  it.each([
+    ["invalid-timestamp", counted(counters(10, 2)).replace("2026-08-01T05:17:49.919Z", "invalid")],
+    ["invalid-request", counted(null, counters(110, 22))],
+    ["invalid-total", counted(counters(10, 2), { input_tokens: "bad" })],
+    ["invalid-request-total", counted({ ...counters(10, 2), total_tokens: 13 })],
+    ["inconsistent", counted(counters(10, 2), counters(250, 50))],
+  ])("does not rebill a legacy replay after %s", (_kind, skipped) => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const original = counted(counters(100, 20));
+    const outputs = [original, skipped, original, counted(counters(30, 5)), original].map(
+      (line) => parseCodexLine(line, state)?.totals.outputTokens ?? null,
+    );
+    expect(outputs).toEqual([20, null, null, 5, 20]);
+  });
+
   it("recovers after a malformed cumulative snapshot leaves a gap", () => {
     const state = initialCodexScanState();
     parseCodexLine(turnContext, state);
