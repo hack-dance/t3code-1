@@ -9,7 +9,7 @@ import * as Schema from "effect/Schema";
 import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
 
-const USAGE_SCAN_CACHE_VERSION = 14 as const;
+const USAGE_SCAN_CACHE_VERSION = 15 as const;
 const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
@@ -17,8 +17,14 @@ const SPEED_COMPATIBLE_SINCE_VERSION = 4;
  * replace it, dropping saved usage for deleted transcripts. Separate files keep
  * both.
  */
-export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v14.json";
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v15.json";
 export const LEGACY_SCAN_CACHE_FILE_NAMES = [
+  "usage-scan-cache-v14.json",
+  "usage-scan-cache-v13.json",
+  "usage-scan-cache-v12.json",
+  "usage-scan-cache-v11.json",
+  "usage-scan-cache-v10.json",
+  "usage-scan-cache-v9.json",
   "usage-scan-cache-v8.json",
   "usage-scan-cache-v7.json",
   "usage-scan-cache-v6.json",
@@ -312,9 +318,11 @@ export function decodeScanCache(
       continue;
     }
     // Keep history for deleted rollouts, but re-parse incompatible reducer state.
-    // Re-scan Codex history whose old reducer could drop or rebill requests after skipped records.
+    // Codex now validates inherited prefixes as usage, in addition to HD's billing deduplication.
+    // Muse now uses source inference IDs and recognizes additional completion records.
     const legacy =
-      format.state !== undefined && (version < 6 || (entry.p === "codex" && version < 14));
+      (format.state !== undefined && (version < 6 || (entry.p === "codex" && version < 15))) ||
+      (entry.p === "muse" && version < 15);
     // A corrupt state disqualifies the entry: resuming with it would attach
     // appended usage to the wrong model or replay fork-copied history.
     if (!legacy && !isValidState.get(entry.p)?.(entry.cs)) continue;

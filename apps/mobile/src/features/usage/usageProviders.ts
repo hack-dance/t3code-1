@@ -39,7 +39,7 @@ export function useProviderColors(): Record<UsageProviderKind, string> {
     opencode: "#5b9bbd",
     antigravity: "#8c7bd1",
     pi: "#4d9f8a",
-    muse: "#7b8fe8",
+    muse: "#0866ff",
   };
 }
 
