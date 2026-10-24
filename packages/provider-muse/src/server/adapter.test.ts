@@ -1137,6 +1137,81 @@ describe("MuseAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect.each([
+    { who: "the thread", subagent: false },
+    { who: "a workflow child", subagent: true },
+  ] as const)("auto-approves read-only shell commands for $who in auto mode", ({ subagent }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const policy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        ...runtimePolicy,
+        runtimeMode: "auto",
+      });
+      const harness = yield* makeHarness(
+        fake,
+        INSTANCE_ID,
+        undefined,
+        undefined,
+        undefined,
+        policy,
+      );
+      const { nativeId } = yield* startConversation(harness, fake);
+      const request = {
+        ...approval(subagent ? "child-run-1" : nativeId),
+        subject: { kind: "shell", command: "ls -la /private/tmp/work" },
+        ...(subagent ? { subagentOrigin: { subagentId: "a7" } } : {}),
+      };
+      const before = harness.allEvents.length;
+      yield* fake.emit("approval/requested", request);
+      const decision = yield* fake.takeCall("approval/decide");
+      assert.strictEqual(decision.params.choiceId, "once");
+      assert.isFalse(
+        harness.allEvents
+          .slice(before)
+          .some(
+            (event) =>
+              event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+          ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect.each([
+    { who: "the thread", subagent: false },
+    { who: "a workflow child", subagent: true },
+  ] as const)("asks the user about other shell commands for $who in auto mode", ({ subagent }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakeMuse();
+      const policy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        ...runtimePolicy,
+        runtimeMode: "auto",
+      });
+      const harness = yield* makeHarness(
+        fake,
+        INSTANCE_ID,
+        undefined,
+        undefined,
+        undefined,
+        policy,
+      );
+      const { nativeId } = yield* startConversation(harness, fake);
+      const request = {
+        ...approval(subagent ? "child-run-1" : nativeId),
+        subject: { kind: "shell", command: "git status" },
+        ...(subagent ? { subagentOrigin: { subagentId: "a7" } } : {}),
+      };
+      yield* fake.emit("approval/requested", request);
+      const asked = yield* harness.takeEvent("runtime_request.updated");
+      assert.strictEqual(asked.runtimeRequest.status, "pending");
+      assert.isFalse(fake.calls.some((call) => call.method === "approval/decide"));
+      yield* fake.emit("approval/resolved", request);
+      yield* harness.takeEvent(
+        "runtime_request.updated",
+        (event) => event.runtimeRequest.status !== "pending",
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("keeps a workflow child's approval pending for the user past the turn's end", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakeMuse();

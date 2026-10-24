@@ -24,9 +24,11 @@ const MUSE_PRESENTATION = {
   displayName: "Muse Code",
   showInteractionModeToggle: false,
   reportsContextWindow: true,
-  // Muse has no native "accept edits" mode, so T3 offers only the two it maps
-  // directly: :ask-me with promptUnmatched, and :unrestricted with allowAll.
-  supportedRuntimeModes: ["approval-required", "full-access"],
+  // Muse has no native "accept edits" mode. T3 maps :ask-me with promptUnmatched,
+  // :unrestricted with allowAll, and "auto" as :ask-me where T3 itself approves
+  // allowlisted read-only commands, so inherited "auto" children (the default
+  // for machine agent-run threads) no longer step down to approval-required.
+  supportedRuntimeModes: ["approval-required", "auto", "full-access"],
 } as const;
 
 const FALLBACK_CAPABILITIES = museModelCapabilities();
