@@ -11,6 +11,7 @@ import * as Cause from "effect/Cause";
 import { v2Now, v2Projection } from "./orchestrationV2TestFixtures.ts";
 import {
   createQuestionHistoryProjector,
+  filterApprovalThreads,
   derivePendingThreadRequests,
   declinePendingApprovals,
   seedUserInputDraftAnswers,
@@ -20,6 +21,45 @@ import {
 
 const requestId = RuntimeRequestId.make("async-question");
 const nodeId = NodeId.make("async-question-node");
+
+it("filters pending approvals by host and project and hides expired or terminal requests", () => {
+  const pending = {
+    environmentId: "host-a",
+    projectId: "project",
+    archivedAt: null,
+    pendingApproval: { expiresAt: 100 },
+  };
+  const otherHost = { ...pending, environmentId: "host-b" };
+  const threads = [
+    pending,
+    otherHost,
+    { ...pending, projectId: "other-project" },
+    { ...pending, pendingApproval: null },
+    { ...pending, pendingApproval: { expiresAt: 99 } },
+    { ...pending, archivedAt: "2026-04-20T00:00:00.000Z" },
+  ];
+  expect(
+    filterApprovalThreads(threads, {
+      environmentIds: new Set(["host-a", "host-b"]),
+      environmentId: "host-a",
+      projectId: "project",
+      nowMs: 99,
+    }),
+  ).toEqual([pending]);
+  expect(
+    filterApprovalThreads(threads, {
+      environmentIds: new Set(["host-a"]),
+      environmentId: "host-b",
+      nowMs: 0,
+    }),
+  ).toEqual([]);
+  expect(
+    filterApprovalThreads(threads, {
+      environmentIds: new Set(["host-a", "host-b"]),
+      nowMs: 100,
+    }),
+  ).toEqual([]);
+});
 
 describe("declining approvals before sending", () => {
   const approval: ThreadPendingApproval = {

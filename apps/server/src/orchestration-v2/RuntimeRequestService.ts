@@ -87,7 +87,12 @@ export const layer: Layer.Layer<
           }
           // Dispatch validates the request while it is pending, then persists the
           // resolved projection before this effect is executed.
-          if (request.status !== "resolved") {
+          const expiryDecline =
+            request.status === "expired" &&
+            request.decision === "decline" &&
+            input.decision === "decline" &&
+            input.answers === undefined;
+          if (request.status !== "resolved" && !expiryDecline) {
             return yield* new RuntimeRequestResponseExecutionError({
               reason: "request-not-ready",
               threadId: input.threadId,

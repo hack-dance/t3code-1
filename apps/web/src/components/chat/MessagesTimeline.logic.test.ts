@@ -277,6 +277,35 @@ describe("deriveMessagesTimelineRows", () => {
     });
   });
 
+  it("keeps the approval expiry state visible when the request has a prompt", () => {
+    const fixture = makeStreamingTimelineFixture();
+    const source = fixture.visibleTurnItems[0]!;
+    const item: OrchestrationV2TurnItem = {
+      ...source.item,
+      id: TurnItemId.make("expired-approval"),
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      type: "approval_request",
+      status: "cancelled",
+      title: "Approval expired after 4 hours",
+      requestId: RuntimeRequestId.make("expired-request"),
+      requestKind: "command",
+      prompt: "Allow the proposed command?",
+    };
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [{ ...source, item }],
+      optimisticMessages: [],
+    });
+    const entry = entries.find((row) => row.kind === "work");
+    expect(entry?.kind === "work" && workEntryDisplayLabel(entry.entry, undefined)).toBe(
+      "Approval expired after 4 hours",
+    );
+    expect(entry?.kind === "work" && entry.entry.detail).toBe("Allow the proposed command?");
+  });
+
   it.each(["waiting", "completed"] as const)(
     "groups approval and user-input requests with commands without expanding them when %s",
     (status) => {

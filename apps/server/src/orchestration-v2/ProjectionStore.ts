@@ -67,6 +67,8 @@ import {
   TurnItemId,
   NodeId,
   ProviderInstanceId,
+  APPROVAL_REQUEST_TTL_MS,
+  approvalRequestExpiresAt,
 } from "@t3tools/contracts";
 import {
   createOrchestrationV2TurnItemVisibility,
@@ -445,6 +447,12 @@ export interface ProjectionStoreV2Shape {
     readonly autoResume: boolean;
     readonly snooze: boolean;
   }) => Effect.Effect<ReadonlyArray<ProjectionLimitRecoveryCandidate>, ProjectionStoreV2Error>;
+  readonly getExpiredApprovalCandidates: (
+    now: DateTime.Utc,
+  ) => Effect.Effect<
+    ReadonlyArray<{ readonly threadId: ThreadId; readonly requestId: RuntimeRequestId }>,
+    ProjectionStoreV2Error
+  >;
   readonly getSettlementCandidates: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionSettlementCandidate>, ProjectionStoreV2Error>;
@@ -1072,6 +1080,7 @@ type ShellThreadRow = {
   readonly blocking_run_stop_requested: number;
   readonly blocking_failure_payload_json: string | null;
   readonly pending_request_payload_json: string | null;
+  readonly pending_approval_payload_json: string | null;
   readonly pending_secret_request_payload_json: string | null;
   readonly latest_user_message_at: string | null;
   readonly latest_user_authored_message_at: string | null;
@@ -1528,6 +1537,17 @@ export function threadShellFromProjection(
       .filter(isActivityRunForShell)
       .toSorted((left, right) => right.ordinal - left.ordinal)[0] ?? null;
   const liveRunIds = new Set(projection.runs.filter(isActivityRunForShell).map((run) => run.id));
+  const pendingApprovalRequest = pendingRuntimeRequestSummary(
+    projection.runtimeRequests
+      .filter(
+        (request) => request.status === "pending" && approvalRequestExpiresAt(request) !== null,
+      )
+      .toSorted(
+        (left, right) =>
+          DateTime.toEpochMillis(right.createdAt) - DateTime.toEpochMillis(left.createdAt) ||
+          right.id.localeCompare(left.id),
+      )[0] ?? null,
+  );
   let pendingRuntimeRequest = pendingRuntimeRequestSummary(
     projection.runtimeRequests
       .filter((request) => request.status === "pending")
@@ -1616,6 +1636,7 @@ export function threadShellFromProjection(
       providerSession?.lastError ?? null,
     ),
     pendingRuntimeRequest,
+    pendingApprovalRequest,
     // Thread detail owns message bodies. Keeping them out of shell rows makes
     // initial hydration and streaming updates independent of transcript size.
     latestVisibleMessage: null,
@@ -1714,6 +1735,7 @@ type ShellThreadState = {
   readonly lastErrorCode: OrchestrationV2ThreadShell["lastErrorCode"];
   readonly usageLimitResetAt: OrchestrationV2ThreadShell["usageLimitResetAt"];
   readonly pendingRuntimeRequest: OrchestrationV2PendingRuntimeRequestSummary | null;
+  readonly pendingApprovalRequest: OrchestrationV2PendingRuntimeRequestSummary | null;
   readonly latestUserMessageAt: DateTime.Utc | null;
   readonly latestUserAuthoredMessageAt: DateTime.Utc | null;
   readonly hasActionableProposedPlan: boolean;
@@ -1870,6 +1892,7 @@ function shellFromState(input: {
     lastErrorCode: input.state.lastErrorCode,
     usageLimitResetAt: input.state.usageLimitResetAt,
     pendingRuntimeRequest: input.state.pendingRuntimeRequest,
+    pendingApprovalRequest: input.state.pendingApprovalRequest,
     latestVisibleMessage: null,
     latestUserMessageAt: input.state.latestUserMessageAt,
     latestUserAuthoredMessageAt: input.state.latestUserAuthoredMessageAt,
@@ -3760,6 +3783,33 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               : new ProjectionStoreReadError({ threadId, cause }),
           ),
         ),
+    );
+
+    const getExpiredApprovalCandidates = Effect.fn("ProjectionStore.getExpiredApprovalCandidates")(
+      function* (now: DateTime.Utc) {
+        const cutoff = DateTime.formatIso(
+          DateTime.makeUnsafe(DateTime.toEpochMillis(now) - APPROVAL_REQUEST_TTL_MS),
+        );
+        const rows = yield* sql<{ thread_id: string; runtime_request_id: string }>`
+          SELECT request.thread_id, request.runtime_request_id
+          FROM orchestration_v2_projection_runtime_requests request
+          INNER JOIN orchestration_v2_projection_threads thread ON thread.thread_id = request.thread_id
+          WHERE request.status = 'pending'
+            AND request.kind IN ('command', 'file-read', 'file-change', 'permission', 'mcp-elicitation')
+            AND request.created_at <= ${cutoff} AND thread.deleted_at IS NULL
+          ORDER BY request.created_at, request.runtime_request_id
+          LIMIT 200
+        `.pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProjectionStoreReadError({ threadId: ThreadId.make("approval-expiry"), cause }),
+          ),
+        );
+        return rows.map((row) => ({
+          threadId: ThreadId.make(row.thread_id),
+          requestId: RuntimeRequestId.make(row.runtime_request_id),
+        }));
+      },
     );
 
     const getLimitRecoveryCandidates = Effect.fn("ProjectionStore.getLimitRecoveryCandidates")(
@@ -5728,6 +5778,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 LIMIT 1
               ) AS pending_request_payload_json,
               (
+                SELECT request.payload_json
+                FROM orchestration_v2_projection_runtime_requests request
+                WHERE request.thread_id = t.thread_id
+                  AND request.status = 'pending'
+                  AND request.kind IN ('command', 'file-read', 'file-change', 'permission', 'mcp-elicitation')
+                ORDER BY request.created_at DESC, request.runtime_request_id DESC
+                LIMIT 1
+              ) AS pending_approval_payload_json,
+              (
                 SELECT secret.payload_json
                 -- Keep runs outermost so completed history is never scanned for a pending secret.
                 FROM orchestration_v2_projection_runs r
@@ -6148,6 +6207,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           pendingTurnItemsByThreadId,
         } = input;
         const thread = yield* decodeThreadPayload(row.payload_json);
+        const pendingApprovalRequest =
+          row.pending_approval_payload_json !== null
+            ? pendingRuntimeRequestSummary(
+                yield* decodeRuntimeRequestPayload(row.pending_approval_payload_json),
+              )
+            : null;
         let pendingRuntimeRequest =
           row.pending_request_payload_json !== null
             ? pendingRuntimeRequestSummary(
@@ -6259,6 +6324,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             row.last_error,
           ),
           pendingRuntimeRequest,
+          pendingApprovalRequest,
           latestUserMessageAt:
             row.latest_user_message_at === null
               ? null
@@ -6514,6 +6580,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getPlan,
       getProviderControlContext,
       getLimitRecoveryCandidates,
+      getExpiredApprovalCandidates,
       getRecoveryThreadIds,
       getUnreadableThreadIds,
       getThreadSnapshot,
@@ -6678,6 +6745,36 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 settledAt: thread.settledAt,
                 pullRequests: thread.pullRequests ?? [],
               })),
+          ),
+        ),
+      getExpiredApprovalCandidates: (now) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()]
+              .filter(({ thread }) => thread.deletedAt === null)
+              .flatMap(({ thread, runtimeRequests }) =>
+                runtimeRequests
+                  .filter((request) => {
+                    const deadline = approvalRequestExpiresAt(request);
+                    return (
+                      request.status === "pending" &&
+                      deadline !== null &&
+                      deadline <= DateTime.toEpochMillis(now)
+                    );
+                  })
+                  .map((request) => ({
+                    threadId: thread.id,
+                    requestId: request.id,
+                    createdAt: request.createdAt,
+                  })),
+              )
+              .sort(
+                (a, b) =>
+                  DateTime.toEpochMillis(a.createdAt) - DateTime.toEpochMillis(b.createdAt) ||
+                  a.requestId.localeCompare(b.requestId),
+              )
+              .slice(0, 200)
+              .map(({ threadId, requestId }) => ({ threadId, requestId })),
           ),
         ),
       getLimitRecoveryCandidates: (options) =>

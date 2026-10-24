@@ -73,11 +73,16 @@ export interface EventSinkV2Shape {
       OrchestrationV2ProviderThread,
       "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
     >;
-    readonly guardPendingUserInputCancellations?: boolean;
+    readonly guardProviderRuntimeRequests?: boolean;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeWithEffects: (input: {
+    /** Skip the entire batch and its effects if this request is no longer pending at commit time. */
+    readonly onlyIfRuntimeRequestPending?: {
+      readonly threadId: ThreadId;
+      readonly requestId: RuntimeRequestId;
+    };
     /**
      * Rebuilds each run.updated from the stored row with only its delegatedCompletion replaced.
      * The batch must not also change that run's lifecycle.
@@ -87,13 +92,13 @@ export interface EventSinkV2Shape {
       OrchestrationV2ProviderThread,
       "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
     >;
-    readonly guardPendingUserInputCancellations?: boolean;
+    readonly guardProviderRuntimeRequests?: boolean;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeIfRunCurrent: (input: {
-    readonly guardPendingUserInputCancellations?: boolean;
+    readonly guardProviderRuntimeRequests?: boolean;
     readonly commandId?: CommandId;
     readonly threadId: ThreadId;
     readonly runId: RunId;
@@ -115,7 +120,7 @@ export interface EventSinkV2Shape {
    * a newer attempt that already claimed the thread.
    */
   readonly writeIfProviderThreadOwner: (input: {
-    readonly guardPendingUserInputCancellations?: boolean;
+    readonly guardProviderRuntimeRequests?: boolean;
     readonly commandId?: CommandId;
     readonly providerThreadId: ProviderThreadId;
     readonly runId: RunId;
@@ -291,9 +296,9 @@ const layerBase: Layer.Layer<
           );
       });
 
-    // A user can answer after terminal normalization reads the pending request.
-    // Recheck inside the write transaction so stale cleanup cannot erase answers.
-    const guardUserInputCancellations =
+    // Answers and expiry can commit after provider event normalization. Recheck in
+    // the write transaction so cleanup and response echoes cannot erase either.
+    const guardRuntimeRequestUpdates =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(function* (events: ReadonlyArray<OrchestrationV2DomainEvent>) {
         const staleRequests = new Set<RuntimeRequestId>();
@@ -319,22 +324,45 @@ const layerBase: Layer.Layer<
             staleNodes.add(event.payload.nodeId);
           }
         }
-        return events.filter((event) => {
-          switch (event.type) {
-            case "runtime-request.updated":
-              return event.payload.status !== "cancelled" || !staleRequests.has(event.payload.id);
-            case "node.updated":
-              return event.payload.status !== "cancelled" || !staleNodes.has(event.payload.id);
-            case "turn-item.updated":
-              return (
-                event.payload.type !== "user_input_request" ||
-                event.payload.status !== "cancelled" ||
-                !staleRequests.has(event.payload.requestId)
-              );
-            default:
-              return true;
-          }
-        });
+        return yield* Effect.filter(
+          events,
+          Effect.fnUntraced(function* (event) {
+            let requestId: RuntimeRequestId | null = null;
+            switch (event.type) {
+              case "runtime-request.updated":
+                requestId = event.payload.id;
+                break;
+              case "node.updated":
+                requestId = event.payload.runtimeRequestId;
+                break;
+              case "turn-item.updated":
+                if (
+                  event.payload.type === "approval_request" ||
+                  event.payload.type === "user_input_request"
+                )
+                  requestId = event.payload.requestId;
+                break;
+            }
+            if (requestId !== null) {
+              const current = yield* projectionStore.getRuntimeRequest(event.threadId, requestId);
+              if (current?.status === "expired") return false;
+            }
+            switch (event.type) {
+              case "runtime-request.updated":
+                return event.payload.status !== "cancelled" || !staleRequests.has(event.payload.id);
+              case "node.updated":
+                return event.payload.status !== "cancelled" || !staleNodes.has(event.payload.id);
+              case "turn-item.updated":
+                return (
+                  event.payload.type !== "user_input_request" ||
+                  event.payload.status !== "cancelled" ||
+                  !staleRequests.has(event.payload.requestId)
+                );
+              default:
+                return true;
+            }
+          }),
+        );
       });
 
     const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
@@ -404,6 +432,14 @@ const layerBase: Layer.Layer<
 
       const { committed } = yield* commitThenPublish(
         Effect.gen(function* () {
+          const pending = input.onlyIfRuntimeRequestPending;
+          if (pending !== undefined) {
+            const current = yield* projectionStore.getRuntimeRequest(
+              pending.threadId,
+              pending.requestId,
+            );
+            if (current?.status !== "pending") return { committed: [], outcomes: [] };
+          }
           // Check ownership in the same transaction that claims the native session.
           const imported = input.unlessNativeThreadOwned;
           if (imported?.nativeThreadRef != null) {
@@ -443,8 +479,8 @@ const layerBase: Layer.Layer<
               )
             : input.events;
           const normalized = yield* normalizeEvents(
-            input.guardPendingUserInputCancellations === true
-              ? yield* guardUserInputCancellations(events)
+            input.guardProviderRuntimeRequests === true
+              ? yield* guardRuntimeRequestUpdates(events)
               : events,
           );
           const committed = yield* eventStore.append({
@@ -502,8 +538,8 @@ const layerBase: Layer.Layer<
             }
 
             const normalized = yield* normalizeEvents(
-              input.guardPendingUserInputCancellations === true
-                ? yield* guardUserInputCancellations(input.events)
+              input.guardProviderRuntimeRequests === true
+                ? yield* guardRuntimeRequestUpdates(input.events)
                 : input.events,
             );
             const storedEvents = yield* eventStore.append({
@@ -567,8 +603,8 @@ const layerBase: Layer.Layer<
           }
 
           const normalized = yield* normalizeEvents(
-            input.guardPendingUserInputCancellations === true
-              ? yield* guardUserInputCancellations(input.events)
+            input.guardProviderRuntimeRequests === true
+              ? yield* guardRuntimeRequestUpdates(input.events)
               : input.events,
           );
           const storedEvents = yield* eventStore.append({

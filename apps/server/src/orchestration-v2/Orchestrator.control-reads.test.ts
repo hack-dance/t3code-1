@@ -39,6 +39,7 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -50,6 +51,20 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ApprovalExpiry from "./ApprovalExpiry.ts";
+import * as EffectWorker from "./EffectWorker.ts";
+import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as RuntimeRequestService from "./RuntimeRequestService.ts";
+import * as RunFinalizationService from "./RunFinalizationService.ts";
+import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
+import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
+import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
+import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -611,7 +626,6 @@ it.effect.each(["client", "ui", "downgraded"] as const)(
                 Effect.result,
               );
             if (
-              source === "ui" ||
               (source !== "downgraded" && age < 4 * 60 * 60 * 1000) ||
               decision === "decline" ||
               decision === "cancel"
@@ -1823,5 +1837,612 @@ it.effect("explicit settle clears snooze atomically and stays idempotent after r
     } as const;
     assert.deepInclude(yield* projections.getThreadShell(threadId), active);
     assert.deepInclude((yield* projections.getThreadProjection(threadId)).thread, active);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("rejects approval responses at the four-hour deadline before queuing provider work", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const threadId = ThreadId.make("thread:approval-deadline");
+    const requestId = RuntimeRequestId.make("approval-deadline");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-approval-deadline"),
+      threadId,
+      projectId: ProjectId.make("project:approval-deadline"),
+      title: "Approval deadline",
+      modelSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* projections.apply({
+      id: EventId.make("approval-deadline"),
+      type: "runtime-request.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: requestId,
+        nodeId: NodeId.make("approval-node"),
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "command",
+        status: "pending",
+        responseCapability: { type: "live", providerSessionId: ProviderSessionId.make("session") },
+        createdAt: now,
+        resolvedAt: null,
+      },
+    });
+    yield* projections.apply({
+      id: EventId.make("approval-session"),
+      type: "provider-session.attached",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: ProviderSessionId.make("session"),
+        driver: adapter.driver,
+        providerInstanceId: instanceId,
+        status: "ready",
+        cwd: "/repo",
+        model: "gpt-6",
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+      },
+    });
+    const earlyRequestId = RuntimeRequestId.make("approval-before-deadline");
+    const pending = yield* projections.getRuntimeRequest(threadId, requestId);
+    assert.ok(pending);
+    yield* projections.apply({
+      id: EventId.make("approval-before-deadline"),
+      type: "runtime-request.updated",
+      threadId,
+      occurredAt: now,
+      payload: { ...pending, id: earlyRequestId, nodeId: NodeId.make("early-approval-node") },
+    });
+    yield* TestClock.adjust("14399999 millis");
+    yield* orchestrator.dispatch({
+      type: "runtime-request.respond",
+      commandId: CommandId.make("approve-before-expiry"),
+      threadId,
+      requestId: earlyRequestId,
+      decision: "accept",
+    });
+    assert.equal(
+      (yield* projections.getRuntimeRequest(threadId, earlyRequestId))?.status,
+      "resolved",
+    );
+    yield* TestClock.adjust("1 millis");
+    const commandId = CommandId.make("approve-expired");
+    const result = yield* orchestrator
+      .dispatch({
+        type: "runtime-request.respond",
+        commandId,
+        threadId,
+        requestId,
+        decision: "accept",
+      })
+      .pipe(Effect.flip);
+    assert.equal(result._tag, "OrchestratorDispatchError");
+    if (result._tag === "OrchestratorDispatchError") {
+      assert.equal(
+        result.cause,
+        "This approval expired after 4 hours. Request a new approval in the thread.",
+      );
+    }
+    assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("preserves provider resolution committed between the expiry read and write", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const threadId = ThreadId.make("thread:approval-sweep");
+    const requestId = RuntimeRequestId.make("approval-sweep");
+    const nodeId = NodeId.make("approval-sweep-node");
+    const runId = RunId.make("approval-sweep-run");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-approval-sweep"),
+      threadId,
+      projectId: ProjectId.make("project:approval-sweep"),
+      title: "Approval sweep",
+      modelSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const sink = yield* EventSink.EventSinkV2;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("approval-sweep-node"),
+          type: "node.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: nodeId,
+            threadId,
+            runId,
+            parentNodeId: null,
+            rootNodeId: nodeId,
+            kind: "approval_request",
+            status: "waiting",
+            countsForRun: false,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            runtimeRequestId: requestId,
+            checkpointScopeId: null,
+            startedAt: now,
+            completedAt: null,
+          },
+        },
+        {
+          id: EventId.make("approval-sweep-request"),
+          type: "runtime-request.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: requestId,
+            nodeId,
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "command",
+            status: "pending",
+            responseCapability: {
+              type: "live",
+              providerSessionId: ProviderSessionId.make("sweep-session"),
+            },
+            createdAt: now,
+            resolvedAt: null,
+          },
+        },
+        {
+          id: EventId.make("approval-sweep-item"),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make("approval-item"),
+            threadId,
+            runId: null,
+            nodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "waiting",
+            title: null,
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+            type: "approval_request",
+            requestId,
+            requestKind: "command",
+            prompt: "Run a command",
+          },
+        },
+      ],
+    });
+    const {
+      request: pendingRequest,
+      node: pendingNode,
+      item: pendingItem,
+    } = yield* projections.getRuntimeResponseContext(threadId, requestId);
+    assert.ok(pendingRequest && pendingNode && pendingItem);
+    yield* TestClock.adjust("4 hours");
+    const resolvedAt = yield* DateTime.now;
+    const resolvedRequest = {
+      ...pendingRequest,
+      status: "resolved" as const,
+      resolvedAt,
+      decision: "accept" as const,
+    };
+    const resolvedNode = { ...pendingNode, status: "completed" as const, completedAt: resolvedAt };
+    const resolvedItem = {
+      ...pendingItem,
+      status: "completed" as const,
+      completedAt: resolvedAt,
+      updatedAt: resolvedAt,
+    };
+    let resolved = false;
+    yield* Effect.gen(function* () {
+      const expiry = yield* ApprovalExpiry.ApprovalExpiry;
+      yield* expiry.sweep;
+    }).pipe(
+      Effect.provide(
+        ApprovalExpiry.layer.pipe(
+          Layer.provide([
+            Layer.succeed(ProjectionStore.ProjectionStoreV2, projections),
+            Layer.succeed(EventSink.EventSinkV2, {
+              ...sink,
+              writeWithEffects: (input) =>
+                Effect.gen(function* () {
+                  // Provider ingestion does not take the expiry thread lock.
+                  yield* sink.write({
+                    guardProviderRuntimeRequests: true,
+                    events: [
+                      {
+                        id: EventId.make("provider-resolved-request"),
+                        type: "runtime-request.updated",
+                        threadId,
+                        occurredAt: resolvedAt,
+                        payload: resolvedRequest,
+                      },
+                      {
+                        id: EventId.make("provider-resolved-node"),
+                        type: "node.updated",
+                        threadId,
+                        occurredAt: resolvedAt,
+                        payload: resolvedNode,
+                      },
+                      {
+                        id: EventId.make("provider-resolved-item"),
+                        type: "turn-item.updated",
+                        threadId,
+                        occurredAt: resolvedAt,
+                        payload: resolvedItem,
+                      },
+                    ],
+                  });
+                  resolved = true;
+                  return yield* sink.writeWithEffects(input);
+                }),
+            }),
+            ThreadCommandExecutor.layer,
+          ]),
+        ),
+      ),
+    );
+    assert.isTrue(resolved);
+    const context = yield* projections.getRuntimeResponseContext(threadId, requestId);
+    assert.deepEqual(context.request, resolvedRequest);
+    assert.deepEqual(context.node, resolvedNode);
+    assert.deepEqual(context.item, resolvedItem);
+    const commandId = CommandId.make(`approval-expiry:${threadId}:${requestId}`);
+    assert.lengthOf(yield* sink.readByCommandId({ commandId }).pipe(Stream.runCollect), 0);
+    assert.lengthOf(yield* outbox.listByCommandId(commandId), 0);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("preserves approval expiry through decline execution and Pi response echoes", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const expiry = yield* ApprovalExpiry.ApprovalExpiry;
+    const threadId = ThreadId.make("thread:approval-sweep");
+    const requestId = RuntimeRequestId.make("approval-sweep");
+    const nodeId = NodeId.make("approval-sweep-node");
+    const runId = RunId.make("approval-sweep-run");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-approval-sweep"),
+      threadId,
+      projectId: ProjectId.make("project:approval-sweep"),
+      title: "Approval sweep",
+      modelSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const sink = yield* EventSink.EventSinkV2;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("approval-sweep-node"),
+          type: "node.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: nodeId,
+            threadId,
+            runId,
+            parentNodeId: null,
+            rootNodeId: nodeId,
+            kind: "approval_request",
+            status: "waiting",
+            countsForRun: false,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            runtimeRequestId: requestId,
+            checkpointScopeId: null,
+            startedAt: now,
+            completedAt: null,
+          },
+        },
+        {
+          id: EventId.make("approval-sweep-request"),
+          type: "runtime-request.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: requestId,
+            nodeId,
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "command",
+            status: "pending",
+            responseCapability: {
+              type: "live",
+              providerSessionId: ProviderSessionId.make("sweep-session"),
+            },
+            createdAt: now,
+            resolvedAt: null,
+          },
+        },
+        {
+          id: EventId.make("approval-sweep-item"),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make("approval-item"),
+            threadId,
+            runId: null,
+            nodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "waiting",
+            title: null,
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+            type: "approval_request",
+            requestId,
+            requestKind: "command",
+            prompt: "Run a command",
+          },
+        },
+      ],
+    });
+    const {
+      request: pendingRequest,
+      node: pendingNode,
+      item: pendingItem,
+    } = yield* projections.getRuntimeResponseContext(threadId, requestId);
+    assert.ok(pendingRequest && pendingNode && pendingItem);
+    yield* TestClock.adjust("14399999 millis");
+    yield* expiry.sweep;
+    assert.equal((yield* projections.getRuntimeRequest(threadId, requestId))?.status, "pending");
+    yield* TestClock.adjust("1 millis");
+    yield* expiry.sweep;
+    const context = yield* projections.getRuntimeResponseContext(threadId, requestId);
+    assert.equal(context.request?.status, "expired");
+    assert.equal(context.item?.title, "Approval expired after 4 hours");
+    assert.equal(context.item?.status, "cancelled");
+    assert.equal(context.node?.status, "cancelled");
+    assert.isNull((yield* projections.getThreadShell(threadId))?.pendingRuntimeRequest);
+    assert.isNull((yield* projections.getThreadShell(threadId))?.pendingApprovalRequest);
+    const expiredEvents = yield* sink
+      .readByCommandId({
+        commandId: CommandId.make(`approval-expiry:${threadId}:${requestId}`),
+      })
+      .pipe(Stream.runCollect);
+    assert.lengthOf(expiredEvents, 3);
+    assert.isTrue(expiredEvents.every(({ event }) => event.runId === runId));
+    const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+    yield* expiry.sweep;
+    assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+    assert.deepEqual(
+      (yield* outbox.listByCommandId(
+        CommandId.make(`approval-expiry:${threadId}:${requestId}`),
+      )).map((effect) => effect.request),
+      [
+        {
+          type: "runtime-request.respond",
+          providerSessionId: ProviderSessionId.make("sweep-session"),
+          requestId,
+          decision: "decline",
+        },
+      ],
+    );
+    const replies: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput[] = [];
+    const ingestorLayer = ProviderEventIngestor.layer.pipe(
+      Layer.provide(Layer.succeed(EventSink.EventSinkV2, sink)),
+      Layer.provide(Layer.succeed(ProjectionStore.ProjectionStoreV2, projections)),
+      Layer.provide(IdAllocator.layer),
+      Layer.provide(ThreadCommandExecutor.layer),
+      Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+    );
+    const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2.pipe(
+      Effect.provide(ingestorLayer),
+    );
+    const sessionsLayer = Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+      get: () =>
+        Effect.succeed(
+          Option.some({
+            respondToRuntimeRequest: (
+              response: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput,
+            ) =>
+              Effect.gen(function* () {
+                replies.push(response);
+                const resolvedAt = yield* DateTime.now;
+                // Pi acknowledges a decline as resolved and completes both history records.
+                const events: ProviderAdapter.ProviderAdapterV2Event[] = [
+                  {
+                    type: "runtime_request.updated",
+                    driver: ProviderDriverKind.make("pi"),
+                    threadId,
+                    runtimeRequest: { ...pendingRequest, status: "resolved", resolvedAt },
+                  },
+                  {
+                    type: "node.updated",
+                    driver: ProviderDriverKind.make("pi"),
+                    node: { ...pendingNode, status: "completed", completedAt: resolvedAt },
+                  },
+                  {
+                    type: "turn_item.updated",
+                    driver: ProviderDriverKind.make("pi"),
+                    turnItem: {
+                      ...pendingItem,
+                      status: "completed",
+                      completedAt: resolvedAt,
+                      updatedAt: resolvedAt,
+                    },
+                  },
+                ];
+                for (const event of events) {
+                  yield* ingestor
+                    .ingestNormalized({
+                      threadId,
+                      providerInstanceId: ProviderInstanceId.make("pi"),
+                      providerSessionId: ProviderSessionId.make("sweep-session"),
+                      event,
+                    })
+                    .pipe(Effect.orDie);
+                }
+              }),
+          } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+        ),
+    });
+    const executorLayer = EffectWorker.layerExecutor.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          sessionsLayer,
+          RuntimeRequestService.layer.pipe(
+            Layer.provide(sessionsLayer),
+            Layer.provide(Layer.succeed(ProjectionStore.ProjectionStoreV2, projections)),
+          ),
+          Layer.mock(RunFinalizationService.RunFinalizationService)({}),
+          Layer.mock(CheckpointRollbackService.CheckpointRollbackServiceV2)({}),
+          Layer.mock(ProviderTurnControlService.ProviderTurnControlServiceV2)({}),
+          Layer.mock(ProviderTurnStartService.ProviderTurnStartServiceV2)({}),
+          Layer.mock(ThreadTitleRegenerationService.ThreadTitleRegenerationService)({}),
+          Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+          Layer.mock(ServerSettings.ServerSettingsService)({}),
+        ),
+      ),
+    );
+    yield* TestClock.adjust("1 second");
+    const drained = yield* EffectWorker.OrchestrationEffectWorkerV2.use((worker) =>
+      worker.drain(),
+    ).pipe(
+      Effect.provide(
+        Layer.fresh(
+          EffectWorker.layer.pipe(
+            Layer.provide(executorLayer),
+            Layer.provide(Layer.succeed(EffectOutbox.EffectOutboxV2, outbox)),
+          ),
+        ),
+      ),
+    );
+    assert.equal(drained, 1);
+    const effects = yield* outbox.listByCommandId(
+      CommandId.make(`approval-expiry:${threadId}:${requestId}`),
+    );
+    assert.equal(effects[0]?.status, "succeeded", effects[0]?.lastError ?? undefined);
+    assert.deepEqual(replies, [{ requestId, decision: "decline" }]);
+    const afterResponse = yield* projections.getRuntimeResponseContext(threadId, requestId);
+    assert.deepEqual(afterResponse, context);
+    assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+    assert.isNull((yield* projections.getThreadShell(threadId))?.pendingApprovalRequest);
+  }).pipe(
+    Effect.provide(
+      ApprovalExpiry.layer.pipe(
+        Layer.provideMerge(layerTest),
+        Layer.provide(ThreadCommandExecutor.layer),
+      ),
+    ),
+  ),
+);
+
+it.effect("continues expiring later approvals when one candidate cannot be read", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const threadId = ThreadId.make("thread:approval-sweep-isolation");
+    const failedId = RuntimeRequestId.make("approval:0-failed");
+    const nextId = RuntimeRequestId.make("approval:1-next");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-approval-sweep-isolation"),
+      threadId,
+      projectId: ProjectId.make("project:approval-sweep-isolation"),
+      title: "Approval sweep isolation",
+      modelSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* sink.write({
+      events: [failedId, nextId].map((id) => ({
+        id: EventId.make(`event:${id}`),
+        type: "runtime-request.updated" as const,
+        threadId,
+        occurredAt: now,
+        payload: {
+          id,
+          nodeId: NodeId.make(`node:${id}`),
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "command" as const,
+          status: "pending" as const,
+          responseCapability: {
+            type: "live" as const,
+            providerSessionId: ProviderSessionId.make("session:isolation"),
+          },
+          createdAt: now,
+          resolvedAt: null,
+        },
+      })),
+    });
+    yield* TestClock.adjust("4 hours");
+    yield* Effect.gen(function* () {
+      const expiry = yield* ApprovalExpiry.ApprovalExpiry;
+      yield* expiry.sweep;
+      yield* expiry.sweep;
+    }).pipe(
+      Effect.provide(
+        ApprovalExpiry.layer.pipe(
+          Layer.provide([
+            Layer.succeed(ProjectionStore.ProjectionStoreV2, {
+              ...projections,
+              getRuntimeResponseContext: (thread, request) =>
+                request === failedId
+                  ? Effect.fail(new ProjectionStore.ProjectionStoreReadError({ threadId: thread }))
+                  : projections.getRuntimeResponseContext(thread, request),
+            }),
+            Layer.succeed(EventSink.EventSinkV2, sink),
+            ThreadCommandExecutor.layer,
+          ]),
+        ),
+      ),
+    );
+    assert.equal((yield* projections.getRuntimeRequest(threadId, failedId))?.status, "pending");
+    assert.equal((yield* projections.getRuntimeRequest(threadId, nextId))?.status, "expired");
+    assert.lengthOf(
+      yield* outbox.listByCommandId(CommandId.make(`approval-expiry:${threadId}:${nextId}`)),
+      1,
+    );
   }).pipe(Effect.provide(layerTest)),
 );
