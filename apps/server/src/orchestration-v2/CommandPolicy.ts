@@ -131,7 +131,7 @@ export function isNativeMaintenanceCommand(message: {
 export function resolveMessageDispatchIntent(
   projection: OrchestrationV2ThreadProjection,
   requestedMode: MessageDispatchMode,
-  deliveryIntent?: "auto" | "steer" | "restart" | "steer_or_start",
+  deliveryIntent?: "auto" | "steer" | "restart" | "steer_or_start" | "start_if_idle",
 ): MessageDispatchMode {
   const mode = resolveDeliveryIntent(projection, requestedMode, deliveryIntent);
   if (mode.type !== "steer_active" || deliveryIntent === "steer_or_start") return mode;
@@ -147,9 +147,9 @@ export function resolveMessageDispatchIntent(
 function resolveDeliveryIntent(
   projection: OrchestrationV2ThreadProjection,
   requestedMode: MessageDispatchMode,
-  deliveryIntent?: "auto" | "steer" | "restart" | "steer_or_start",
+  deliveryIntent?: "auto" | "steer" | "restart" | "steer_or_start" | "start_if_idle",
 ): MessageDispatchMode {
-  if (deliveryIntent === undefined) return requestedMode;
+  if (deliveryIntent === undefined || deliveryIntent === "start_if_idle") return requestedMode;
 
   const activeRun = projection.runs.findLast(
     (run) =>

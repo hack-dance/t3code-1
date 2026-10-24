@@ -797,6 +797,11 @@ const make = Effect.gen(function* () {
       createdBy: input.createdBy,
       creationSource: input.creationSource,
     }).pipe(
+      Effect.tap(() =>
+        input.mode === "auto" || input.mode === "steer"
+          ? orchestrator.awaitSteeringDelivery(input)
+          : Effect.void,
+      ),
       Effect.catchTags({
         OrchestratorThreadNotSteerableError: (cause) =>
           Effect.fail(

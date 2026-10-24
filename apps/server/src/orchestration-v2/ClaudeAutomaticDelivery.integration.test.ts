@@ -398,7 +398,13 @@ it.effect.each(deliveries)(
                 assert.equal(offers.length, 1);
                 return;
               }
-              const sent = yield* send;
+              const accepted = yield* watch(
+                (event) => event.type === "message.updated" && event.payload.id === messageId,
+              );
+              const sending = yield* send.pipe(Effect.forkScoped);
+              yield* Fiber.join(accepted);
+              yield* worker.drain();
+              const sent = yield* Fiber.join(sending);
               assert.equal(sent.delivery, "steered");
               assert.equal(sent.run.id, parent.id);
               assert.equal(sent.projection.runs.length, 1);

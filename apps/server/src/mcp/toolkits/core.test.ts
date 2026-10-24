@@ -1319,3 +1319,81 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
     ),
   ),
 );
+
+it.effect.each([undefined, "auto", "queue", "steer", "restart"] as const)(
+  "attachment send exposes mode %s and preserves steering failures",
+  (mode) => {
+    const attachment = ChatImageAttachment.make({
+      type: "image",
+      id: "stored-image",
+      name: "image.png",
+      mimeType: "image/png",
+      sizeBytes: 10,
+    });
+    const shell = McpToolAccessTestkit.liveThreadShell(threadId);
+    const projection = McpToolAccessTestkit.idleThreadProjection(shell);
+    const calls: ThreadManagement.ThreadManagementSendInput[] = [];
+    return Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const result = yield* server
+        .callTool({
+          name: "t3_thread_send_attachments",
+          arguments: {
+            threadId,
+            message: "Look at this",
+            attachments: [attachment],
+            ...(mode === undefined ? {} : { mode }),
+          },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.mode).toBe(mode ?? "auto");
+      if (mode === "queue") {
+        expect(result.isError).toBe(false);
+        expect(result.structuredContent).toMatchObject({ threadId, status: "queued" });
+      } else {
+        expect(declaredFailure(result)).toMatchObject({ code: "thread_not_sendable" });
+        expect(declaredFailure(result).message).toContain(threadId);
+        expect(declaredFailure(result).message).toContain('mode:"queue"');
+      }
+    }).pipe(
+      Effect.provide(
+        McpHttpServer.layerAttachmentToolkit.pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provide(
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: () => Effect.succeed(shell),
+              getProjectThreadRecords: () =>
+                Effect.succeed({
+                  ...projection,
+                  messages: [{ attachments: [attachment] }],
+                } as unknown as typeof projection),
+              sendToThread: (input) => {
+                calls.push(input);
+                if (input.mode !== "queue")
+                  return Effect.fail(
+                    new ThreadManagement.ThreadManagementNoSteerableRunError({
+                      threadId,
+                      mode: input.mode === "restart" ? "restart" : "steer",
+                    }),
+                  );
+                return Effect.succeed({
+                  message: { attachments: [attachment] },
+                  run: { id: RunId.make("queued-attachment"), status: "queued" },
+                } as unknown as ThreadManagement.ThreadManagementSendResult);
+              },
+            }),
+          ),
+          Layer.provide(ServerSecretStore.layer),
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-attachment-send-" }),
+          ),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    );
+  },
+);

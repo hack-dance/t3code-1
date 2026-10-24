@@ -2830,7 +2830,7 @@ export const OrchestrationV2Command = Schema.Union([
     manualContinuationOfRunId: Schema.optional(RunId),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
     deliveryIntent: Schema.optional(
-      Schema.Literals(["auto", "steer", "restart", "steer_or_start"]),
+      Schema.Literals(["auto", "steer", "restart", "steer_or_start", "start_if_idle"]),
     ),
     delegatedCompletion: Schema.optional(
       Schema.Struct({
