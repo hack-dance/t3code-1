@@ -21,6 +21,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
+  pinPatchedDependencyVersions,
   buildDesktopBundles,
   DesktopBuildManifestRestoreError,
   BundleNotSelfContainedError,
@@ -1737,3 +1738,20 @@ it.effect.skipIf(!symlinksSupported)("rebases packaged links into the isolated t
     );
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+it("pinPatchedDependencyVersions pins ranged patched deps so lockfile-less stage installs keep using the patch", () => {
+  assert.deepStrictEqual(
+    pinPatchedDependencyVersions(
+      { "node-pty": "^1.2.0-beta.15", effect: "^4.0.0" },
+      { "node-pty@1.2.0-beta.15": "patches/node-pty@1.2.0-beta.15.patch" },
+    ),
+    { "node-pty": "1.2.0-beta.15", effect: "^4.0.0" },
+  );
+  assert.deepStrictEqual(
+    pinPatchedDependencyVersions(
+      { "@scope/pkg": "^2.0.0" },
+      { "@scope/pkg@2.1.0": "p1.patch", "other@1.0.0": "p2.patch" },
+    ),
+    { "@scope/pkg": "2.1.0" },
+  );
+});

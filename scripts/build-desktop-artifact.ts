@@ -1647,6 +1647,24 @@ export function createStagePatchedDependencies(
   );
 }
 
+/**
+ * Staged installs have no lockfile, so a range like `^1.2.0-beta.15` floats to
+ * whatever the registry publishes next and pnpm then fails with
+ * ERR_PNPM_UNUSED_PATCH. Pin every patched dependency to its patched version.
+ */
+export function pinPatchedDependencyVersions<T extends Record<string, unknown>>(
+  dependencies: T,
+  patchedDependencies: Record<string, string>,
+): T {
+  const pinned: Record<string, unknown> = { ...dependencies };
+  for (const patchKey of Object.keys(patchedDependencies)) {
+    const name = getPatchedDependencyPackageName(patchKey);
+    const version = patchKey.slice(name.length + 1);
+    if (version.length > 0 && Object.hasOwn(pinned, name)) pinned[name] = version;
+  }
+  return pinned as T;
+}
+
 function getPatchedDependencyPackageName(patchKey: string): string {
   const versionSeparator = patchKey.lastIndexOf("@");
   return versionSeparator > 0 ? patchKey.slice(0, versionSeparator) : patchKey;
@@ -3159,10 +3177,13 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   yield* fs.makeDirectory(path.join(serverStageDir, "apps/server"), { recursive: true });
   yield* fs.copy(input.serverDistDir, path.join(serverStageDir, "apps/server/dist"));
 
-  const sidecarDependencies = {
-    ...input.runtimeExternalDependencies,
-    ...resolveFffNativeDependencies("win", input.arch, input.fffNodeVersion),
-  };
+  const sidecarDependencies = pinPatchedDependencyVersions(
+    {
+      ...input.runtimeExternalDependencies,
+      ...resolveFffNativeDependencies("win", input.arch, input.fffNodeVersion),
+    },
+    input.patchedDependencies,
+  );
   const sidecarPatchedDependencies = createStagePatchedDependencies(
     input.patchedDependencies,
     sidecarDependencies,
@@ -3875,7 +3896,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     );
   }
 
-  const stageDependencies =
+  const stageDependencies = pinPatchedDependencyVersions(
     options.platform === "win"
       ? { ...resolvedDesktopRuntimeDependencies }
       : resolveMergedStageDependencies({
@@ -3884,7 +3905,9 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
           desktopDependencies: resolvedDesktopRuntimeDependencies,
           arch: options.arch,
           fffNodeVersion: serverPackageJson.dependencies["@ff-labs/fff-node"],
-        });
+        }),
+    workspacePatchedDependencies,
+  );
   const stagePatchedDependencies = createStagePatchedDependencies(
     workspacePatchedDependencies,
     stageDependencies,
