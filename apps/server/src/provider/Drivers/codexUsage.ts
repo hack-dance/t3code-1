@@ -70,6 +70,7 @@ export const CodexScanState = Schema.Struct({
   speed: Schema.mutableKey(Schema.Literals(["standard", "fast", "ultrafast"])),
   sessionId: Schema.mutableKey(Schema.String),
   lastUsageSignature: Schema.mutableKey(Schema.NullOr(Schema.String)),
+  lastBilledCumulativeUsage: Schema.mutableKey(Schema.NullOr(CodexTokenUsage)),
   lastCumulativeUsage: Schema.mutableKey(Schema.NullOr(CodexTokenUsage)),
   malformedRecords: Schema.mutableKey(TokenCount),
   sawSessionMeta: Schema.mutableKey(Schema.Boolean),
@@ -87,6 +88,7 @@ export function initialCodexScanState(): CodexScanState {
     speed: "standard",
     sessionId: "",
     lastUsageSignature: null,
+    lastBilledCumulativeUsage: null,
     lastCumulativeUsage: null,
     malformedRecords: 0,
     sawSessionMeta: false,
@@ -186,8 +188,8 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   if (typeof info !== "object" || info === null) return null;
   const infoRecord = info as Record<string, unknown>;
 
-  // A skipped request leaves an unknown baseline. Do not let it suppress a later
-  // re-emission or make the next valid cumulative delta look inconsistent.
+  // A skipped request leaves an unknown recovery baseline. Preserve the billed snapshot
+  // so a later re-emission cannot charge the same request again.
   const timestampMs = parseTimestampMs(record["timestamp"]);
   if (timestampMs === null || state.model.length === 0) {
     state.lastUsageSignature = null;
@@ -229,6 +231,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
   // Zero-component counters report context size, not a request: fill_to_context_window, or the
   // post-compaction marker whose total is the new context size (its cumulative may reset to zero).
   if (last.input_tokens + last.output_tokens === 0) {
+    state.lastBilledCumulativeUsage = null;
     state.lastUsageSignature = null;
     state.lastCumulativeUsage = cumulative;
     return null;
@@ -236,8 +239,10 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
 
   if (
     cumulative !== null &&
-    previous !== null &&
-    CODEX_USAGE_FIELDS.every((key) => cumulative[key] === previous[key])
+    [previous, state.lastBilledCumulativeUsage].some(
+      (snapshot) =>
+        snapshot !== null && CODEX_USAGE_FIELDS.every((key) => cumulative[key] === snapshot[key]),
+    )
   ) {
     return null;
   }
@@ -278,6 +283,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
     state.lastCumulativeUsage = advanced;
   }
   state.lastUsageSignature = signature;
+  state.lastBilledCumulativeUsage = state.lastCumulativeUsage;
 
   const inputTokens = last.input_tokens;
   const cachedInputTokens = last.cached_input_tokens;

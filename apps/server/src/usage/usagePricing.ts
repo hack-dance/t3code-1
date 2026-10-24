@@ -215,17 +215,19 @@ export function lookupRate(table: RateTable, model: string): ModelRate | null {
   return rate;
 }
 
+const ACCOUNT_PREFIXES = new Set(["personal", "hd", "dio", "work", "ln"]);
+
 function resolveRate(table: RateTable, model: string): ModelRate | null {
   let key = stripVariantSuffix(normalizeRateKey(model));
   const bareName = bareModelName(key);
   if (bareName.length === 0 || UNPRICEABLE_MODELS.has(bareName)) return null;
-  // Account labels can precede provider-qualified names. Prefer the most specific
-  // published key; the table only creates bare aliases when their rates agree.
+  // Only account labels are removable: stripping a provider could select a bare alias
+  // published by a different provider.
   for (;;) {
     const rate = table.get(key);
     if (rate !== undefined) return rate;
     const slash = key.indexOf("/");
-    if (slash === -1) return null;
+    if (slash === -1 || !ACCOUNT_PREFIXES.has(key.slice(0, slash))) return null;
     key = key.slice(slash + 1);
   }
 }

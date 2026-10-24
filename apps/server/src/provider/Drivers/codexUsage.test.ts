@@ -90,6 +90,26 @@ describe("parseCodexLine", () => {
     },
   );
 
+  it.each(["invalid-timestamp", "malformed-total"])(
+    "does not rebill a cumulative re-emission after %s",
+    (kind) => {
+      const state = initialCodexScanState();
+      parseCodexLine(turnContext, state);
+      const request = counters(100, 20);
+      const original = counted(request, request);
+      expect(parseCodexLine(original, state)?.totals.outputTokens).toBe(20);
+      const skipped =
+        kind === "invalid-timestamp"
+          ? original.replace("2026-08-01T05:17:49.919Z", "invalid")
+          : counted(request, { input_tokens: "bad" });
+      expect(parseCodexLine(skipped, state)).toBeNull();
+      expect(parseCodexLine(original, state)).toBeNull();
+      expect(
+        parseCodexLine(counted(counters(10, 2), counters(110, 22)), state)?.totals.outputTokens,
+      ).toBe(2);
+    },
+  );
+
   it("recovers after a malformed cumulative snapshot leaves a gap", () => {
     const state = initialCodexScanState();
     parseCodexLine(turnContext, state);
