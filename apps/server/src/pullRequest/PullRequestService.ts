@@ -2587,11 +2587,12 @@ export const make = Effect.gen(function* () {
   const filterOptions: PullRequestService["Service"]["filterOptions"] = Effect.fn(
     "PullRequestService.filterOptions",
   )(function* (input) {
-    const { supported } = yield* listWorkspaceProjects(input);
-    // Worktrees of one checkout are separate projects over the same repository.
-    const repositories = [
-      ...new Map(supported.map((project) => [project.cursorKey, project])).values(),
-    ];
+    const { supported, viewerRoots } = yield* listWorkspaceProjects(input, {
+      includeCheckouts: true,
+    });
+    const repositories = (yield* selectInboxProjects(supported, viewerRoots)).filter(
+      ({ viewer }) => viewer.viewer !== null,
+    );
     const refOf = (project: SupportedProject) => ({
       cwd: project.project.workspaceRoot,
       repository: project.repository,
@@ -2606,11 +2607,11 @@ export const make = Effect.gen(function* () {
     ) =>
       Effect.forEach(
         repositories,
-        (project): Effect.Effect<ReadonlyArray<ProviderFilterOptionPage<A>>> => {
+        ({ project, viewer }): Effect.Effect<ReadonlyArray<ProviderFilterOptionPage<A>>> => {
           const page = read(project);
           return page === undefined
             ? Effect.succeed([])
-            : page.pipe(
+            : withInboxAccount(project, viewer, page).pipe(
                 Effect.map((answered) => [answered]),
                 Effect.orElseSucceed(() => []),
               );

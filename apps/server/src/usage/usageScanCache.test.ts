@@ -66,6 +66,25 @@ function cacheWith(entries: readonly [string, number, readonly UsageRecord[]][])
 }
 
 describe("scan cache round trip", () => {
+  it("reparses v14 Muse transcripts while retaining deleted history and other providers", () => {
+    const original = cacheWith([
+      ["/gone-muse.jsonl", 100, [record({ provider: "muse", dedupeKey: "muse:envelope" })]],
+      ["/claude.jsonl", 100, [record()]],
+    ]);
+    const muse = { ...original.get("/gone-muse.jsonl")!, provider: "muse" as const };
+    original.set("/gone-muse.jsonl", muse);
+    const restored = decodeScanCache(
+      { ...encodeScanCache(original), version: 14 },
+      TEST_FORMAT_MAP,
+    );
+    expect(restored.get("/gone-muse.jsonl")).toEqual({
+      ...muse,
+      size: -1,
+      position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+    });
+    expect(restored.get("/claude.jsonl")).toEqual(original.get("/claude.jsonl"));
+  });
+
   it("restores cached history unchanged except for Claude local placeholders", () => {
     const original = cacheWith([
       [

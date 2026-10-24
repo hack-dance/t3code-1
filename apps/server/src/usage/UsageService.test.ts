@@ -2339,11 +2339,11 @@ describe("UsageService", () => {
             60 + 20 * (version === 4 ? 1 : 2),
           );
           yield* upgraded.awaitPersisted;
-          assert.strictEqual(SCAN_CACHE_FILE_NAME, "usage-scan-cache-v14.json");
+          assert.strictEqual(SCAN_CACHE_FILE_NAME, "usage-scan-cache-v15.json");
           const persisted = yield* Effect.promise(() => NodeFSP.readFile(cachePath, "utf8"));
           assert.strictEqual(
             (decodeUnknownJsonString(persisted) as { version: number }).version,
-            14,
+            15,
           );
           assert.strictEqual(
             yield* Effect.promise(() => NodeFSP.readFile(legacyPath, "utf8")),

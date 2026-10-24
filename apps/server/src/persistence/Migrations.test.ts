@@ -26,6 +26,28 @@ const v2TableCount = Effect.gen(function* () {
 });
 
 describe("runMigrations", () => {
+  it.effect("upgrades HD migration 68 while retaining both fork and upstream indexes", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 68 });
+      assert.deepStrictEqual(yield* runMigrations(), [[69, "ShellStopRequestIndex"]]);
+      const indexes = yield* sql<{ readonly name: string }>`
+        SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (
+          'orchestration_v2_projection_runtime_requests_pending_expiry_idx',
+          'orchestration_v2_projection_turn_items_stop_request_idx'
+        ) ORDER BY name
+      `;
+      assert.deepStrictEqual(
+        indexes.map(({ name }) => name),
+        [
+          "orchestration_v2_projection_runtime_requests_pending_expiry_idx",
+          "orchestration_v2_projection_turn_items_stop_request_idx",
+        ],
+      );
+      assert.deepStrictEqual(yield* runMigrations(), []);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
   it.effect("refuses to start when another migration took a V2 id", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

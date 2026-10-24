@@ -920,6 +920,60 @@ it.effect("offers each label once across repositories, despite one that cannot b
   }),
 );
 
+it.effect.each(["labels", "authors"] as const)(
+  "discovers %s through the inbox's readable checkout and pinned account",
+  (kind) =>
+    Effect.gen(function* () {
+      const reads: Array<readonly [string, string]> = [];
+      const read = (cwd: string) =>
+        Effect.gen(function* () {
+          reads.push([cwd, yield* SourceControlRateLimit.CredentialScope]);
+        });
+      const service = yield* makeService({
+        projects: [
+          project({
+            id: "broken",
+            title: "Signed out",
+            workspaceRoot: "/broken",
+            repository: "acme/web",
+          }),
+          project({
+            id: "healthy",
+            title: "Signed in",
+            workspaceRoot: "/healthy",
+            repository: "acme/web",
+          }),
+        ],
+        providers: [
+          inboxProvider(
+            { "/healthy": "work-user" },
+            {
+              listRepositoryLabels: ({ cwd }) =>
+                read(cwd).pipe(
+                  Effect.as({ items: [{ name: "bug", color: null }], truncated: false }),
+                ),
+              searchRepositoryAuthors: ({ cwd }) =>
+                read(cwd).pipe(
+                  Effect.as({
+                    items: [{ login: "work-user", name: null, avatarUrl: null }],
+                    truncated: false,
+                  }),
+                ),
+            },
+          ),
+        ],
+      });
+      const options = yield* service.filterOptions({ kind });
+      assert.deepStrictEqual(reads, [["/healthy", "work-user"]]);
+      assert.deepStrictEqual(
+        kind === "labels"
+          ? options.labels.map((label) => label.name)
+          : options.authors.map((author) => author.login),
+        kind === "labels" ? ["bug"] : ["work-user"],
+      );
+    }),
+);
+
 it.effect("puts the author a query names exactly ahead of those it only begins", () =>
   Effect.gen(function* () {
     const queries: Array<string | undefined> = [];
