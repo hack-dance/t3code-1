@@ -59,7 +59,6 @@ export const BUILT_IN_USAGE_DRIVERS: ReadonlyArray<
   CodexDriver,
   GrokDriver,
   PiDriver,
-  MuseDriver,
   OpenCodeDriver,
   MuseDriver,
   AntigravityDriver,

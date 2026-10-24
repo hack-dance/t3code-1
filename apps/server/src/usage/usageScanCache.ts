@@ -318,10 +318,10 @@ export function decodeScanCache(
       continue;
     }
     // Keep history for deleted rollouts, but re-parse incompatible reducer state.
-    // Re-scan Codex history whose old reducer could drop or rebill requests after skipped records.
+    // Codex now validates inherited prefixes as usage, in addition to HD's billing deduplication.
     // Muse now uses source inference IDs and recognizes additional completion records.
     const legacy =
-      (format.state !== undefined && (version < 6 || (entry.p === "codex" && version < 14))) ||
+      (format.state !== undefined && (version < 6 || (entry.p === "codex" && version < 15))) ||
       (entry.p === "muse" && version < 15);
     // A corrupt state disqualifies the entry: resuming with it would attach
     // appended usage to the wrong model or replay fork-copied history.
