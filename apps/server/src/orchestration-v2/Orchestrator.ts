@@ -7710,7 +7710,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       const expiresAt = approvalRequestExpiresAt(runtimeRequest);
-      if (expiresAt !== null && DateTime.toEpochMillis(now) >= expiresAt) {
+      if (
+        expiresAt !== null &&
+        DateTime.toEpochMillis(now) >= expiresAt &&
+        command.decision !== "decline" &&
+        command.decision !== "cancel"
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,

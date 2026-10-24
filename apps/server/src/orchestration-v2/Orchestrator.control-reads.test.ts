@@ -642,8 +642,9 @@ it.effect.each(["client", "ui", "downgraded"] as const)(
                 Effect.result,
               );
             if (
-              age < 4 * 60 * 60 * 1000 &&
-              (source !== "downgraded" || decision === "decline" || decision === "cancel")
+              (source !== "downgraded" && age < 4 * 60 * 60 * 1000) ||
+              decision === "decline" ||
+              decision === "cancel"
             ) {
               assert.isTrue(Result.isSuccess(result));
               assert.equal(
