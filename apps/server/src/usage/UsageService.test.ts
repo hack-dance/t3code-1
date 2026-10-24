@@ -145,6 +145,7 @@ const layerService = (input: {
       ServerConfig.layerTest(process.cwd(), NodePath.join(input.home, input.prefix)),
     ),
     Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.succeed(HostProcess.HomeDirectory, input.home)),
     Layer.provideMerge(Layer.succeed(HostProcess.Platform, input.platform ?? "linux")),
     Layer.provideMerge(ServerSettings.layerTest(input.settings)),
     Layer.provideMerge(
@@ -793,6 +794,111 @@ describe("UsageService", () => {
               },
             }),
           ),
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "reads Muse session usage recursively, dedupes record IDs, and leaves cost unpriced",
+    () =>
+      Effect.gen(function* () {
+        const { home, settings } = yield* setup;
+        const root = NodePath.join(
+          home,
+          ".local",
+          "share",
+          "muse",
+          "sessions",
+          "2026",
+          "08",
+          "01",
+          "session-1",
+        );
+        const entry = {
+          schema_version: 1,
+          id: "muse-record-1",
+          sequence: 1,
+          stream: { kind: "session", id: "session-1" },
+          recorded_at: 1785578400123456,
+          record_type: "event",
+          payload_type: "runtime.session",
+          payload: {
+            kind: "run",
+            run_id: "run-1",
+            event: {
+              kind: "model_completed",
+              model: "muse-wonder-1.0",
+              duration_ms: 100,
+              usage: {
+                input_tokens: 100,
+                output_tokens: 20,
+                cached_tokens: 30,
+                cache_read_tokens: 30,
+                cache_write_tokens: 10,
+                reasoning_tokens: 5,
+              },
+            },
+          },
+        };
+        yield* Effect.promise(async () => {
+          await NodeFSP.mkdir(NodePath.join(root, "subagent"), { recursive: true });
+          await NodeFSP.mkdir(NodePath.join(root, "tool-outputs"), { recursive: true });
+          const line = JSON.stringify(entry);
+          await NodeFSP.writeFile(
+            NodePath.join(root, "session.jsonl"),
+            [
+              "{broken",
+              "null",
+              line,
+              line,
+              JSON.stringify({
+                ...entry,
+                id: "attribution",
+                payload: {
+                  ...entry.payload,
+                  event: { ...entry.payload.event, kind: "goal_usage_attribution" },
+                },
+              }),
+            ].join("\n") + "\n",
+          );
+          await NodeFSP.writeFile(
+            NodePath.join(root, "subagent", "session.jsonl"),
+            line +
+              "\n" +
+              JSON.stringify({
+                ...entry,
+                id: "child-record",
+                stream: { kind: "session", id: "child-session" },
+              }) +
+              "\n",
+          );
+          await NodeFSP.writeFile(
+            NodePath.join(root, "tool-outputs", "output.jsonl"),
+            JSON.stringify({ ...entry, id: "ignored-output" }) + "\n",
+          );
+          await NodeFSP.writeFile(
+            NodePath.join(root, "tool-outputs", "session.jsonl"),
+            JSON.stringify({ ...entry, id: "unattributable", stream: {} }) + "\n",
+          );
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* UsageService.make;
+          const summary = yield* service.readSummary(WINDOW);
+          const buckets = summary.buckets.filter((bucket) => bucket.provider === "muse");
+          assert.strictEqual(buckets.length, 1);
+          assert.strictEqual(totalTokens(buckets[0]!.totals), 240);
+          assert.strictEqual(buckets[0]?.unpricedRecords, 2);
+          assert.strictEqual(buckets[0]?.costUsd, 0);
+          assert.strictEqual(
+            summary.sources.find((source) => source.fingerprint.provider === "muse")?.status,
+            "ok",
+          );
+          yield* service.awaitPersisted;
+          const restarted = yield* UsageService.make;
+          assert.deepStrictEqual((yield* restarted.readSummary(WINDOW)).buckets, summary.buckets);
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(layerService({ prefix: "usage-muse", home, settings })),
         );
       }).pipe(Effect.scoped),
   );
